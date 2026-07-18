@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish stable release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(node -e "const p=JSON.parse(require('fs').readFileSync('package.json','utf8')); process.stdout.write(p.version)")"
+          LOCK_VERSION="$(node -e "const p=JSON.parse(require('fs').readFileSync('package-lock.json','utf8')); process.stdout.write(p.version)")"
+          LOCK_PACKAGE_VERSION="$(node -e "const p=JSON.parse(require('fs').readFileSync('package-lock.json','utf8')); process.stdout.write(p.packages[''].version)")"
+          MANIFEST_VERSION="$(node -e "const p=JSON.parse(require('fs').readFileSync('public/manifest.json','utf8')); process.stdout.write(p.version)")"
+
+          if [[ "$VERSION" != "$PACKAGE_VERSION" || "$VERSION" != "$LOCK_VERSION" || "$VERSION" != "$LOCK_PACKAGE_VERSION" || "$VERSION" != "$MANIFEST_VERSION" ]]; then
+            echo "版本不一致：tag=$VERSION package=$PACKAGE_VERSION lock=$LOCK_VERSION lock_package=$LOCK_PACKAGE_VERSION manifest=$MANIFEST_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Build extension
+        run: npm run build
+
+      - name: Package extension
+        working-directory: dist
+        run: zip -r ../extension.zip . -x '*.DS_Store'
+
+      - name: Verify package layout
+        shell: bash
+        run: |
+          test -s extension.zip
+          ARCHIVE_VERSION="$(unzip -p extension.zip manifest.json | node -e "let value=''; process.stdin.on('data', chunk => value += chunk).on('end', () => process.stdout.write(JSON.parse(value).version))")"
+          test "$ARCHIVE_VERSION" = "${GITHUB_REF_NAME#v}"
+
+      - name: Publish stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" extension.zip \
+            --verify-tag \
+            --generate-notes \
+            --latest \
+            --title "HeyNote $GITHUB_REF_NAME"
