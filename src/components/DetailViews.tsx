@@ -990,7 +990,7 @@ function CommentEntry({
           <UserLevelBadge level={comment.level} compact />
         </header>
         {(comment.text || (nested && comment.replyToAuthor && comment.replyToCommentId !== rootCommentId)) && (
-          <p>
+          <p className={`comment-entry__content ${comment.isCy ? "comment-entry__content--cy" : ""}`.trim()}>
             {nested && comment.replyToAuthor && comment.replyToCommentId !== rootCommentId && (
               <span className="comment-entry__reply-to">回复 {comment.replyToAuthor}：</span>
             )}
@@ -998,6 +998,11 @@ function CommentEntry({
           </p>
         )}
         <CommentImages comment={comment} onImageOpen={onImageOpen} />
+        {comment.isAuthorLiked && (
+          <div className="comment-entry__tag-line">
+            <span className="comment-entry__author-liked"><span>作者赞过</span></span>
+          </div>
+        )}
         <footer>
           <span>{[comment.createdAt, comment.ipLocation].filter(Boolean).join(" · ") || "来自小黑盒"}</span>
           {!nested && onToggleCommentLike && (

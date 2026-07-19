@@ -76,6 +76,7 @@ const comments: CommentItem[] = [
     createdAt: "2 天前",
     ipLocation: "广东",
     likes: 5,
+    isAuthorLiked: true,
     replies: []
   },
   {
@@ -86,6 +87,7 @@ const comments: CommentItem[] = [
     createdAt: "1 天前",
     ipLocation: "上海",
     likes: 2,
+    isCy: true,
     replies: [{
       id: "c2-1",
       author: "夜航员",

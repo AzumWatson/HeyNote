@@ -946,7 +946,7 @@ input:focus-visible {
   margin: 7px 0 0;
   overflow: hidden;
   color: var(--muted);
-  font-family: "Songti SC", "STSong", serif;
+  font-family: inherit;
   font-size: 13px;
   line-height: 1.62;
   -webkit-box-orient: vertical;
@@ -2601,6 +2601,22 @@ button.detail-interactions__metric {
   word-break: normal;
 }
 
+.comment-entry__content--cy {
+  position: relative;
+  min-height: 22px;
+  text-indent: 20px;
+}
+
+.comment-entry__content--cy::before {
+  position: absolute;
+  top: 3px;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  background: url("https://imgheybox.max-c.com/oa/2024/10/31/ce360d2affd7976e27e5c68a3de676c7.png") left top / 100% 100% no-repeat;
+  content: "";
+}
+
 .comment-entry__reply-to {
   margin-right: 3px;
   color: var(--muted);
@@ -2656,6 +2672,35 @@ button.detail-interactions__metric {
 .comment-entry__image-button:focus-visible {
   outline: 2px solid var(--red);
   outline-offset: 2px;
+}
+
+.comment-entry__tag-line {
+  display: flex;
+  align-items: center;
+  margin: 10px 0 6px;
+}
+
+.comment-entry__author-liked {
+  position: relative;
+  width: 46px;
+  height: 16px;
+}
+
+.comment-entry__author-liked > span {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 200%;
+  height: 200%;
+  padding: 4px 10px;
+  border-radius: 4px;
+  color: rgb(100, 105, 110);
+  background-color: rgb(243, 244, 245);
+  font-size: 18px;
+  line-height: 24px;
+  white-space: nowrap;
+  transform: scale(.5);
+  transform-origin: left top;
 }
 
 .post-rich-text__emoji {

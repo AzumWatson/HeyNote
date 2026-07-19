@@ -106,6 +106,8 @@ export interface CommentItem {
   ipLocation?: string;
   likes: number;
   isLiked?: boolean;
+  isCy?: boolean;
+  isAuthorLiked?: boolean;
   replies: CommentItem[];
   replyCount?: number;
   hasMoreReplies?: boolean;

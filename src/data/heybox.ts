@@ -679,6 +679,8 @@ function mapComment(value: unknown, fallbackId = ""): CommentItem | null {
     ipLocation: asText(item.ip_location) || undefined,
     likes: asNumber(item.up, item.support_num, item.like_num),
     isLiked: hasFieldValue(item.is_support) ? asNumber(item.is_support) === 1 : undefined,
+    isCy: isEnabledFlag(item.is_cy),
+    isAuthorLiked: isEnabledFlag(item.is_author_award),
     replies: nested,
     replyCount,
     hasMoreReplies: asNumber(item.has_more) === 1 && nested.length < replyCount
