@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "minimum_chrome_version": "102",
-  "name": "HeyNote 小黑书",
+  "name": "HeyNote Xiaoheishu",
   "short_name": "HeyNote",
-  "version": "0.7.31",
-  "description": "在小黑盒论坛首页一键切换原版与 HeyNote 小黑书瀑布流。",
+  "version": "0.8.0",
+  "description": "Switch between the original Xiaoheihe forum and the HeyNote browsing experience.",
   "permissions": ["storage", "scripting", "downloads", "clipboardWrite"],
   "host_permissions": [
     "https://www.xiaoheihe.cn/*",
@@ -21,9 +21,14 @@
       "matches": ["https://www.xiaoheihe.cn/app/bbs/home*"],
       "js": ["domain-claim.js"],
       "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.xiaoheihe.cn/app/search*"],
+      "js": ["search-bridge.js"],
+      "run_at": "document_start"
     }
   ],
   "action": {
-    "default_title": "打开 HeyNote 小黑书"
+    "default_title": "Open HeyNote Xiaoheishu"
   }
 }

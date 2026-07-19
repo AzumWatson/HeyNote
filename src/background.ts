@@ -2,7 +2,7 @@ type JsonScalar = string | number | boolean | null;
 
 interface HeyboxApiMessage {
   channel: "xiaoheishu-api";
-  operation: "feed" | "feedBanner" | "communityFeed" | "detail" | "comments" | "commentReplies" | "originalImage" | "favoriteFolders" | "likePost" | "favoritePost" | "likeComment" | "followUser" | "unfollowUser";
+  operation: "feed" | "feedBanner" | "communityFeed" | "searchSuggestion" | "detail" | "comments" | "commentReplies" | "originalImage" | "favoriteFolders" | "likePost" | "favoritePost" | "likeComment" | "followUser" | "unfollowUser";
   params?: Record<string, JsonScalar>;
 }
 
@@ -17,6 +17,23 @@ type InternalMessage =
       channel: "xiaoheishu-internal";
       operation: "switch-mode";
       mode: BrowseMode;
+    }
+  | {
+      channel: "xiaoheishu-internal";
+      operation: "install-search-bridge-main";
+      bridgeId: string;
+      keyword: string;
+    }
+  | {
+      channel: "xiaoheishu-internal";
+      operation: "start-search-bridge-tab";
+      bridgeId: string;
+      keyword: string;
+    }
+  | {
+      channel: "xiaoheishu-internal";
+      operation: "close-search-bridge-tab";
+      bridgeId: string;
     }
   | {
       channel: "xiaoheishu-internal";
@@ -43,11 +60,13 @@ const VERSION_KEY = "xiaoheishu:loaded-version";
 const HOME_PATH = "/app/bbs/home";
 const HOME_URL = `https://www.xiaoheihe.cn${HOME_PATH}`;
 const HOME_MATCH = `${HOME_URL}*`;
+const SEARCH_BRIDGE_PARAM = "xiaoheishu_bridge";
 
 const OPERATION_PATHS: Record<HeyboxApiMessage["operation"], string> = {
   feed: "/bbs/app/feeds",
   feedBanner: "/bbs/app/feeds/banner",
   communityFeed: "/bbs/app/topic/feeds",
+  searchSuggestion: "/bbs/app/api/search/suggestion/v2",
   detail: "/bbs/app/link/tree",
   comments: "/bbs/app/link/tree",
   commentReplies: "/bbs/app/comment/sub/comments",
@@ -96,6 +115,18 @@ function isHomePageUrl(url: string | undefined): boolean {
     return parsed.protocol === "https:"
       && parsed.hostname === "www.xiaoheihe.cn"
       && parsed.pathname === HOME_PATH;
+  } catch {
+    return false;
+  }
+}
+
+function isSearchPageUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:"
+      && parsed.hostname === "www.xiaoheihe.cn"
+      && parsed.pathname.startsWith("/app/search");
   } catch {
     return false;
   }
@@ -416,6 +447,15 @@ function queryParamsFor(
     };
   }
 
+  if (operation === "searchSuggestion") {
+    requireExactKeys(params, ["keyword"]);
+    const keyword = typeof params.keyword === "string" ? params.keyword.trim() : "";
+    if (!keyword || keyword.length > 80) {
+      throw new Error("API parameter keyword must be 1-80 characters");
+    }
+    return { q: keyword };
+  }
+
   if (operation === "detail") {
     requireExactKeys(params, ["linkId"]);
     return {
@@ -513,8 +553,81 @@ function isInternalMessage(value: unknown): value is InternalMessage {
   if (message.operation === "copy-image") {
     return typeof message.url === "string";
   }
+  if (message.operation === "install-search-bridge-main") {
+    return typeof message.bridgeId === "string"
+      && message.bridgeId.length > 0
+      && message.bridgeId.length <= 80
+      && typeof message.keyword === "string"
+      && message.keyword.trim().length > 0
+      && message.keyword.length <= 80;
+  }
+  if (message.operation === "start-search-bridge-tab") {
+    return typeof message.bridgeId === "string"
+      && message.bridgeId.length > 0
+      && message.bridgeId.length <= 80
+      && typeof message.keyword === "string"
+      && message.keyword.trim().length > 0
+      && message.keyword.length <= 80;
+  }
+  if (message.operation === "close-search-bridge-tab") {
+    return typeof message.bridgeId === "string"
+      && message.bridgeId.length > 0
+      && message.bridgeId.length <= 80;
+  }
   return message.operation === "switch-mode"
     && (message.mode === "original" || message.mode === "xiaoheishu");
+}
+
+function originalSearchBridgeUrl(keyword: string, bridgeId: string): string {
+  const url = new URL("https://www.xiaoheihe.cn/app/search");
+  const query = keyword.trim();
+  url.searchParams.set("q", query);
+  url.searchParams.set("keyword", query);
+  url.searchParams.set(SEARCH_BRIDGE_PARAM, bridgeId);
+  url.searchParams.set("xiaoheishu_silent", "1");
+  return url.href;
+}
+
+async function startSearchBridgeTab(
+  message: Extract<InternalMessage, { operation: "start-search-bridge-tab" }>,
+  sender: chrome.runtime.MessageSender
+): Promise<{ tabId?: number }> {
+  if (
+    sender.id !== chrome.runtime.id
+    || typeof sender.tab?.id !== "number"
+    || !isHomePageUrl(sender.url)
+  ) {
+    throw new Error("Invalid search bridge sender");
+  }
+
+  const tab = await chrome.tabs.create({
+    url: originalSearchBridgeUrl(message.keyword, message.bridgeId),
+    active: false,
+    openerTabId: sender.tab.id
+  });
+  return { tabId: tab.id };
+}
+
+async function closeSearchBridgeTab(
+  message: Extract<InternalMessage, { operation: "close-search-bridge-tab" }>,
+  sender: chrome.runtime.MessageSender
+): Promise<void> {
+  if (
+    sender.id !== chrome.runtime.id
+    || typeof sender.tab?.id !== "number"
+    || !isSearchPageUrl(sender.url)
+  ) {
+    throw new Error("Invalid search bridge close sender");
+  }
+
+  try {
+    const tab = await chrome.tabs.get(sender.tab.id);
+    const url = new URL(tab.url || "");
+    if (url.searchParams.get(SEARCH_BRIDGE_PARAM) !== message.bridgeId) return;
+  } catch {
+    return;
+  }
+  await chrome.tabs.remove(sender.tab.id);
 }
 
 async function mountDomainEntry(sender: chrome.runtime.MessageSender): Promise<void> {
@@ -546,6 +659,370 @@ async function switchBrowseMode(
     throw new Error("浏览模式切换来源无效");
   }
   await setBrowseMode(mode);
+}
+
+function pageInstallSearchBridgeMain(bridgeId: string, keyword: string): { ok: true } {
+  const global = window as typeof window & { __xiaoheishuSearchBridgeInstalled?: boolean };
+  if (global.__xiaoheishuSearchBridgeInstalled) return { ok: true };
+  global.__xiaoheishuSearchBridgeInstalled = true;
+
+  const normalizedKeyword = keyword.trim().toLocaleLowerCase();
+  const bridgeEvent = "xiaoheishu:search-bridge-result";
+
+  function requestUrl(input: RequestInfo | URL): string {
+    if (typeof input === "string") return input;
+    if (input instanceof URL) return input.href;
+    return input.url;
+  }
+
+  function textBody(body: BodyInit | null | undefined): string {
+    if (typeof body === "string") return body;
+    if (body instanceof URLSearchParams) return body.toString();
+    return "";
+  }
+
+  function shouldCapture(rawUrl: string, body = ""): boolean {
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl, location.href);
+    } catch {
+      return false;
+    }
+    const host = parsed.hostname.toLocaleLowerCase();
+    const path = parsed.pathname.toLocaleLowerCase();
+    if (!host.endsWith("xiaoheihe.cn")) return false;
+    if (path.includes("/api/search/suggestion")) return false;
+    if (!path.startsWith("/bbs/") && !path.includes("search")) return false;
+
+    const candidates = [
+      parsed.searchParams.get("q"),
+      parsed.searchParams.get("keyword"),
+      parsed.searchParams.get("word"),
+      parsed.searchParams.get("key")
+    ].filter((value): value is string => Boolean(value));
+    if (candidates.some((value) => value.trim().toLocaleLowerCase() === normalizedKeyword)) return true;
+
+    const lowerBody = body.toLocaleLowerCase();
+    return lowerBody.includes(`q=${encodeURIComponent(normalizedKeyword)}`)
+      || lowerBody.includes(`keyword=${encodeURIComponent(normalizedKeyword)}`)
+      || lowerBody.includes(normalizedKeyword);
+  }
+
+  function asRecord(value: unknown): Record<string, unknown> {
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+  }
+
+  function textValue(...values: unknown[]): string {
+    for (const value of values) {
+      if (typeof value === "string" && value.trim()) return value.trim();
+      if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    }
+    return "";
+  }
+
+  function looksLikePost(value: unknown): boolean {
+    const item = asRecord(value);
+    const nested = asRecord(item.link ?? item.link_info ?? item.bbs_link ?? item.post ?? item.source ?? item.data);
+    const merged = { ...nested, ...item };
+    const id = textValue(merged.linkid, merged.link_id, merged.id);
+    const title = textValue(merged.title, merged.link_title, merged.subject, merged.name);
+    const description = textValue(merged.description, merged.summary, merged.excerpt, merged.link_desc);
+    return Boolean(id && (title || description));
+  }
+
+  function findPostEntries(value: unknown, depth = 0): unknown[] {
+    if (depth > 5) return [];
+    if (Array.isArray(value)) return value.some(looksLikePost) ? value : [];
+
+    const record = asRecord(value);
+    for (const key of [
+      "links",
+      "link_list",
+      "items",
+      "list",
+      "rows",
+      "results",
+      "search_result",
+      "search_results",
+      "data"
+    ]) {
+      const entries = findPostEntries(record[key], depth + 1);
+      if (entries.length) return entries;
+    }
+
+    for (const nestedValue of Object.values(record)) {
+      const entries = findPostEntries(nestedValue, depth + 1);
+      if (entries.length) return entries;
+    }
+    return [];
+  }
+
+  function isPostSearchPayload(data: unknown): boolean {
+    const root = asRecord(data);
+    if (root.status && root.status !== "ok") return false;
+    const result = Object.keys(asRecord(root.result)).length ? asRecord(root.result) : root;
+    return findPostEntries(result).length > 0;
+  }
+
+  function emit(rawUrl: string, data: unknown): void {
+    window.dispatchEvent(new CustomEvent(bridgeEvent, {
+      detail: JSON.stringify({
+        bridgeId,
+        keyword,
+        url: rawUrl,
+        data
+      })
+    }));
+  }
+
+  function captureText(rawUrl: string, text: string): void {
+    try {
+      const data = JSON.parse(text) as unknown;
+      if (isPostSearchPayload(data)) emit(rawUrl, data);
+    } catch {
+      // Non-JSON search responses are not useful for the React renderer.
+    }
+  }
+
+  function MM(value: string, alphabet: string, end: number): string {
+    let result = "";
+    const available = alphabet.slice(0, end);
+    for (let index = 0; index < value.length; index += 1) {
+      result += available[value.charCodeAt(index) % available.length];
+    }
+    return result;
+  }
+
+  function PM(value: string, alphabet: string): string {
+    let result = "";
+    for (let index = 0; index < value.length; index += 1) {
+      result += alphabet[value.charCodeAt(index) % alphabet.length];
+    }
+    return result;
+  }
+
+  function vwe(values: string[]): string {
+    let result = "";
+    const length = Math.max(...values.map((value) => value.length));
+    for (let index = 0; index < length; index += 1) {
+      values.forEach((value) => {
+        if (index < value.length) result += value[index];
+      });
+    }
+    return result;
+  }
+
+  function gwe(values: number[]): number {
+    return values.reduce((sum, value) => sum + value, 0);
+  }
+
+  function f3(value: number): number {
+    return value & 128 ? ((value << 1) ^ 27) & 255 : value << 1;
+  }
+
+  function Ic(value: number): number {
+    return f3(value) ^ value;
+  }
+
+  function wf(value: number): number {
+    return Ic(f3(value));
+  }
+
+  function Dh(value: number): number {
+    return wf(Ic(f3(value)));
+  }
+
+  function ag(value: number): number {
+    return Dh(value) ^ wf(value) ^ Ic(value);
+  }
+
+  function mwe(values: number[]): number[] {
+    const mixed = [0, 0, 0, 0];
+    mixed[0] = ag(values[0]) ^ Dh(values[1]) ^ wf(values[2]) ^ Ic(values[3]);
+    mixed[1] = Ic(values[0]) ^ ag(values[1]) ^ Dh(values[2]) ^ wf(values[3]);
+    mixed[2] = wf(values[0]) ^ Ic(values[1]) ^ ag(values[2]) ^ Dh(values[3]);
+    mixed[3] = Dh(values[0]) ^ wf(values[1]) ^ Ic(values[2]) ^ ag(values[3]);
+    values[0] = mixed[0];
+    values[1] = mixed[1];
+    values[2] = mixed[2];
+    values[3] = mixed[3];
+    return values;
+  }
+
+  function leftRotate(value: number, shift: number): number {
+    return ((value << shift) | (value >>> (32 - shift))) >>> 0;
+  }
+
+  function MD5(value: string): string {
+    const bytes = Array.from(new TextEncoder().encode(value));
+    const bitLength = bytes.length * 8;
+    bytes.push(128);
+    while (bytes.length % 64 !== 56) bytes.push(0);
+
+    const lowLength = bitLength >>> 0;
+    const highLength = Math.floor(bitLength / 0x100000000) >>> 0;
+    for (let index = 0; index < 4; index += 1) bytes.push((lowLength >>> (index * 8)) & 255);
+    for (let index = 0; index < 4; index += 1) bytes.push((highLength >>> (index * 8)) & 255);
+
+    const shifts = [
+      7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+      5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+      4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+      6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21
+    ];
+    const constants = Array.from({ length: 64 }, (_, index) =>
+      Math.floor(Math.abs(Math.sin(index + 1)) * 0x100000000) >>> 0
+    );
+
+    let a0 = 0x67452301;
+    let b0 = 0xefcdab89;
+    let c0 = 0x98badcfe;
+    let d0 = 0x10325476;
+
+    for (let offset = 0; offset < bytes.length; offset += 64) {
+      const words = Array.from({ length: 16 }, (_, index) => {
+        const start = offset + index * 4;
+        return (
+          bytes[start]
+          | (bytes[start + 1] << 8)
+          | (bytes[start + 2] << 16)
+          | (bytes[start + 3] << 24)
+        ) >>> 0;
+      });
+
+      let a = a0;
+      let b = b0;
+      let c = c0;
+      let d = d0;
+
+      for (let index = 0; index < 64; index += 1) {
+        let f: number;
+        let wordIndex: number;
+        if (index < 16) {
+          f = (b & c) | (~b & d);
+          wordIndex = index;
+        } else if (index < 32) {
+          f = (d & b) | (~d & c);
+          wordIndex = (5 * index + 1) % 16;
+        } else if (index < 48) {
+          f = b ^ c ^ d;
+          wordIndex = (3 * index + 5) % 16;
+        } else {
+          f = c ^ (b | ~d);
+          wordIndex = (7 * index) % 16;
+        }
+
+        const previousD = d;
+        d = c;
+        c = b;
+        const sum = (a + f + constants[index] + words[wordIndex]) >>> 0;
+        b = (b + leftRotate(sum, shifts[index])) >>> 0;
+        a = previousD;
+      }
+
+      a0 = (a0 + a) >>> 0;
+      b0 = (b0 + b) >>> 0;
+      c0 = (c0 + c) >>> 0;
+      d0 = (d0 + d) >>> 0;
+    }
+
+    return [a0, b0, c0, d0].map((word) =>
+      [0, 8, 16, 24]
+        .map((shift) => ((word >>> shift) & 255).toString(16).padStart(2, "0"))
+        .join("")
+    ).join("");
+  }
+
+  function Tr(rawPath: string, timestamp: number, nonce: string): string {
+    const normalizedPath = `/${rawPath.split("/").filter(Boolean).join("/")}/`;
+    const alphabet = "AB45STUVWZEFGJ6CH01D237IXYPQRKLMN89";
+    const timePart = MM(String(timestamp), alphabet, -2);
+    const pathPart = PM(normalizedPath, alphabet);
+    const noncePart = PM(nonce, alphabet);
+    const interleaved = vwe([timePart, pathPart, noncePart]).slice(0, 20);
+    const digest = MD5(interleaved).toString();
+    const tail = digest.slice(-6).split("").map((char) => char.charCodeAt(0));
+    let checksum = String(gwe(mwe(tail)) % 100);
+    if (checksum.length < 2) checksum = `0${checksum}`;
+    const prefix = MM(digest.substring(0, 5), alphabet, -4);
+    return prefix + checksum;
+  }
+
+  function cookieValue(name: string): string {
+    const prefix = `${name}=`;
+    const part = document.cookie.split(";").map((item) => item.trim())
+      .find((item) => item.startsWith(prefix));
+    if (!part) return "-1";
+    const raw = part.slice(prefix.length);
+    try {
+      return decodeURIComponent(raw) || "-1";
+    } catch {
+      return raw || "-1";
+    }
+  }
+
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const rawUrl = requestUrl(input);
+    const body = textBody(init?.body);
+    const response = await originalFetch(input, init);
+    if (shouldCapture(rawUrl, body)) {
+      void response.clone().text().then((text) => captureText(rawUrl, text)).catch(() => undefined);
+    }
+    return response;
+  }) as typeof window.fetch;
+
+  const xhrUrls = new WeakMap<XMLHttpRequest, string>();
+  const xhrBodies = new WeakMap<XMLHttpRequest, string>();
+  const originalOpen = XMLHttpRequest.prototype.open;
+  const originalSend = XMLHttpRequest.prototype.send;
+
+  XMLHttpRequest.prototype.open = function patchedOpen(
+    method: string,
+    url: string | URL,
+    async?: boolean,
+    username?: string | null,
+    password?: string | null
+  ) {
+    xhrUrls.set(this, String(url));
+    return originalOpen.call(this, method, url, async ?? true, username ?? null, password ?? null);
+  };
+
+  XMLHttpRequest.prototype.send = function patchedSend(body?: Document | XMLHttpRequestBodyInit | null) {
+    xhrBodies.set(this, typeof body === "string" ? body : body instanceof URLSearchParams ? body.toString() : "");
+    this.addEventListener("loadend", function onLoadEnd() {
+      const rawUrl = xhrUrls.get(this);
+      if (!rawUrl || !shouldCapture(rawUrl, xhrBodies.get(this) ?? "")) return;
+      const text = typeof this.response === "string" ? this.response : this.responseText;
+      if (text) captureText(rawUrl, text);
+    }, { once: true });
+    return originalSend.call(this, body ?? null);
+  };
+
+  return { ok: true };
+}
+
+async function installSearchBridgeMain(
+  message: Extract<InternalMessage, { operation: "install-search-bridge-main" }>,
+  sender: chrome.runtime.MessageSender
+): Promise<void> {
+  if (
+    sender.id !== chrome.runtime.id
+    || typeof sender.tab?.id !== "number"
+    || !isSearchPageUrl(sender.url)
+  ) {
+    throw new Error("Invalid search bridge sender");
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId: sender.tab.id },
+    world: "MAIN",
+    injectImmediately: true,
+    func: pageInstallSearchBridgeMain,
+    args: [message.bridgeId, message.keyword]
+  });
 }
 
 function pageFetchHeyboxApi(
@@ -838,6 +1315,7 @@ async function handleApiMessage(
     operation !== "feed"
     && operation !== "feedBanner"
     && operation !== "communityFeed"
+    && operation !== "searchSuggestion"
     && operation !== "detail"
     && operation !== "comments"
     && operation !== "commentReplies"
@@ -920,9 +1398,15 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       ? mountDomainEntry(sender)
       : message.operation === "switch-mode"
         ? switchBrowseMode(message.mode, sender)
-        : message.operation === "download-image"
-          ? downloadImage(message, sender)
-          : copyImageData(message, sender);
+        : message.operation === "install-search-bridge-main"
+          ? installSearchBridgeMain(message, sender)
+          : message.operation === "start-search-bridge-tab"
+            ? startSearchBridgeTab(message, sender)
+            : message.operation === "close-search-bridge-tab"
+              ? closeSearchBridgeTab(message, sender)
+              : message.operation === "download-image"
+                ? downloadImage(message, sender)
+                : copyImageData(message, sender);
     void task.then((result) => {
       sendResponse(result ? { ok: true, ...result } : { ok: true });
     }).catch((error) => {

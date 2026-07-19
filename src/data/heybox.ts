@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   CommentContentPart,
   CommentItem,
   CommentRepliesResult,
@@ -154,6 +154,17 @@ function topicFrom(item: UnknownRecord): UnknownRecord {
     if (Object.keys(candidate).length > 0) return candidate;
   }
   return {};
+}
+
+function topicIconFrom(item: UnknownRecord): string | undefined {
+  return remoteUrl(item.small_pic_url)
+    || remoteUrl(item.pic_url)
+    || remoteUrl(item.icon_url)
+    || remoteUrl(item.icon)
+    || remoteUrl(item.logo_url)
+    || remoteUrl(item.logo)
+    || remoteUrl(item.avatar)
+    || remoteUrl(item.image);
 }
 
 function levelFrom(user: UnknownRecord, item: UnknownRecord): string | undefined {
@@ -351,7 +362,8 @@ function mapFeedPost(value: unknown, fallback?: FeedPost): FeedPost | null {
     level: levelFrom(user, item) || fallback?.level,
     isFollowing: hasFieldValue(rawFollowStatus) ? asNumber(rawFollowStatus) === 1 : fallback?.isFollowing,
     topic: asText(topic.name, item.topic_name, item.category_name, fallback?.topic) || "盒友杂谈",
-    topicIcon: remoteUrl(topic.small_pic_url) || remoteUrl(topic.pic_url) || remoteUrl(topic.icon) || fallback?.topicIcon,
+    topicId: asText(topic.topic_id, topic.id, item.topic_id, item.category_id, fallback?.topicId) || undefined,
+    topicIcon: topicIconFrom(topic) || fallback?.topicIcon,
     contentTags: contentTagsFrom(item, fallback?.contentTags),
     media,
     kind,
@@ -365,6 +377,87 @@ function mapFeedPost(value: unknown, fallback?: FeedPost): FeedPost | null {
     createdAt: formatDate(item.create_at) || fallback?.createdAt,
     ipLocation: asText(item.ip_location, fallback?.ipLocation) || undefined
   };
+}
+
+function mapSearchPost(value: unknown): FeedPost | null {
+  const direct = mapFeedPost(value);
+  if (direct) {
+    const item = asRecord(value);
+    if (asNumber(item.xiaoheishu_dom_search) === 1) {
+      const author = asText(item.username);
+      const topic = asText(item.topic_name);
+      return {
+        ...direct,
+        excerpt: "",
+        author,
+        avatar: remoteUrl(item.avatar),
+        level: asText(item.level) || undefined,
+        topic: topic || direct.topic,
+        topicId: asText(item.topic_id) || direct.topicId,
+        topicIcon: remoteUrl(item.topic_icon) || direct.topicIcon,
+        favorites: hasFieldValue(item.favour_count) ? direct.favorites : undefined,
+        comments: hasFieldValue(item.comment_num) ? direct.comments : 0,
+        likes: hasFieldValue(item.link_award_num) ? direct.likes : 0
+      };
+    }
+    return direct;
+  }
+
+  const item = asRecord(value);
+  for (const nestedValue of [item.link, item.link_info, item.bbs_link, item.post, item.source, item.data]) {
+    const nested = asRecord(nestedValue);
+    if (!Object.keys(nested).length) continue;
+    const post = mapFeedPost({ ...nested, ...item });
+    if (post) return post;
+  }
+  return null;
+}
+
+function collectSearchEntries(value: unknown, depth = 0): unknown[] {
+  if (depth > 3) return [];
+  if (Array.isArray(value)) return value;
+
+  const record = asRecord(value);
+  for (const key of [
+    "links",
+    "link_list",
+    "items",
+    "list",
+    "rows",
+    "results",
+    "search_result",
+    "search_results",
+    "data"
+  ]) {
+    const entries = collectSearchEntries(record[key], depth + 1);
+    if (entries.some((entry) => Boolean(mapSearchPost(entry)))) return entries;
+  }
+
+  for (const nestedValue of Object.values(record)) {
+    const entries = collectSearchEntries(nestedValue, depth + 1);
+    if (entries.some((entry) => Boolean(mapSearchPost(entry)))) return entries;
+  }
+  return [];
+}
+
+function collectSuggestionTexts(value: unknown, depth = 0): string[] {
+  if (depth > 3) return [];
+  if (typeof value === "string" || typeof value === "number") {
+    const text = asText(value);
+    return text ? [text] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectSuggestionTexts(item, depth + 1));
+  }
+
+  const record = asRecord(value);
+  const direct = asText(record.keyword, record.word, record.q, record.text, record.title, record.name, record.value);
+  if (direct) return [direct];
+  for (const key of ["suggestions", "suggestion", "keywords", "words", "list", "items", "data"]) {
+    const texts = collectSuggestionTexts(record[key], depth + 1);
+    if (texts.length) return texts;
+  }
+  return Object.values(record).flatMap((item) => collectSuggestionTexts(item, depth + 1));
 }
 
 function parseContentBlocks(value: unknown, firstHtmlIsCompleteDocument = false): ContentBlock[] {
@@ -834,7 +927,7 @@ export async function fetchFeedCommunities(): Promise<Community[]> {
     const name = asText(item.name);
     if (!id || !name || seen.has(id)) return [];
     seen.add(id);
-    return [{ id, name }];
+    return [{ id, name, iconUrl: topicIconFrom(item) }];
   });
 }
 
@@ -876,6 +969,46 @@ export async function fetchFeedPage(
     nextOffset: offset + pageStep,
     ...(nextLastValue ? { lastValue: nextLastValue } : {})
   };
+}
+
+export function parseSearchPayload(payload: unknown, offset = 0, limit = 20): FeedResult {
+  const safeLimit = Math.min(50, Math.max(1, Math.round(limit)));
+  const result = resultRecord(payload);
+  const entries = collectSearchEntries(result);
+  const links = entries.filter((value) => asNumber(asRecord(value).content_type) !== 18);
+  const posts = links
+    .map((value) => mapSearchPost(value))
+    .filter((post): post is FeedPost => Boolean(post));
+  if (links.length > 0 && posts.length === 0) {
+    throw new Error("小黑盒搜索结果字段发生了变化，当前页面暂时无法解析");
+  }
+
+  const explicitHasMore = asNumber(result.has_more, result.hasMore) === 1
+    || asText(result.has_more, result.hasMore).toLowerCase() === "true";
+  const total = optionalNumber(result.total, result.count, result.total_count);
+  const nextOffset = offset + Math.max(posts.length, safeLimit);
+  return {
+    posts,
+    hasMore: explicitHasMore || (total ? nextOffset < total : posts.length >= safeLimit),
+    nextOffset
+  };
+}
+
+export async function fetchSearchSuggestions(keyword: string): Promise<string[]> {
+  const query = keyword.trim();
+  if (!query) return [];
+
+  const payload = await callBackground({
+    channel: "xiaoheishu-api",
+    operation: "searchSuggestion",
+    params: { keyword: query }
+  });
+  const result = resultRecord(payload);
+  const seen = new Set<string>();
+  return collectSuggestionTexts(result)
+    .map((text) => text.trim())
+    .filter((text) => text && !seen.has(text) && Boolean(seen.add(text)))
+    .slice(0, 8);
 }
 
 export async function fetchPostDetail(linkId: string, fallbackPost?: FeedPost): Promise<PostDetail> {

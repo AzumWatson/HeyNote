@@ -1,118 +1,121 @@
 # HeyNote 构建与发布指南
 
-本文档面向需要检查源码、进行本地研究或维护正式版本的人员。普通用户请直接从 GitHub Releases 下载稳定版 `extension.zip`。
+本文面向需要维护、调试或打包 HeyNote 的开发者。普通用户建议直接从 GitHub Releases 下载稳定版 `extension.zip`。
 
-> [!IMPORTANT]
-> 根据本项目的 [Custom License](../LICENSE)，允许用户为查看、学习、研究和非商业性修改而在本地下载、编译及运行源码。未经书面许可，不得公开发布或分发修改后的源码、衍生代码或构建产物；提交和正式发版章节仅适用于 AzumWatson 或已取得书面授权的维护者。
+> 根据项目 [Custom License](../LICENSE)，源码可用于查看、学习、研究和非商业性本地修改。未经书面许可，不得公开发布或分发修改版源码、衍生代码或构建产物。
 
 ## 环境要求
 
-- Git
-- Node.js `20.19+`，或 `22.12+`
+- Node.js `20.19+` 或 `22.12+`
 - npm
-- Chrome 102+ 或新版 Edge
+- Chrome 102+ 或新版 Microsoft Edge
 
 ## 安装依赖
-
-仓库包含 `package-lock.json`，首次获取源码后建议使用：
 
 ```bash
 npm ci
 ```
 
-需要调整依赖版本时才使用 `npm install`，并同步更新锁文件。未经书面许可，不得公开发布或分发由此产生的修改版。
+只有在需要调整依赖版本时才使用 `npm install`，并同步提交 `package-lock.json`。
 
-## 本地视觉样稿
+## 本地预览
 
 ```bash
 npm run dev
 ```
 
-访问 `http://127.0.0.1:4173/`。该页面使用静态示例数据，只用于检查图文、视频、文章和评论布局，不读取小黑盒账号，也不请求真实接口。
+访问 `http://127.0.0.1:4173/`。本地预览使用静态示例数据，适合检查瀑布流、详情页、评论、搜索结果卡片和主题外观，不会请求真实小黑盒接口。
 
-## 类型检查
+## 检查与构建
 
 ```bash
 npm run typecheck
-```
-
-## 生产构建
-
-```bash
 npm run build
+npm run verify:dist
 ```
 
-`build` 会先执行 TypeScript 检查，再由 Vite 清空并重新生成 `dist/`。正常产物包括：
+- `typecheck`：运行 TypeScript 类型检查。
+- `build`：先执行类型检查，再生成扩展产物。
+- `verify:dist`：检查 `dist/manifest.json`、Manifest 引用脚本、版本号和关键文件是否连通。
+
+正常生产产物：
 
 ```text
 dist/
 ├── background.js
 ├── domain-claim.js
 ├── domain-entry.js
+├── search-bridge.js
 └── manifest.json
 ```
 
-`dist/` 是生成目录，不应直接修改。
+`dist/` 是生成目录，不应手动修改。
 
 ## 项目结构
 
 ```text
 HeyNote/
-├── .github/workflows/release.yml    稳定版自动构建与发布
-├── public/manifest.json             Chrome Manifest V3 清单
+├── .github/workflows/          GitHub CI 与 Release 自动化
+├── docs/                       构建说明和维护记录
+├── public/manifest.json        Chrome Manifest V3 清单
+├── scripts/verify-dist.mjs     构建产物连通性检查
 ├── src/
-│   ├── background.ts                后台入口、请求桥与图片操作
-│   ├── domain-claim.ts              浏览模式判定与失败回退
-│   ├── domain-entry.tsx             Shadow DOM 生产挂载入口
-│   ├── App.tsx                      信息流、筛选、主题与交互状态
-│   ├── components/                  详情、播放器与通用界面组件
-│   └── data/                        小黑盒接口映射与表情解析
-├── vite.config.ts                   扩展多入口构建配置
+│   ├── background.ts           后台入口、API 桥、搜索桥标签页和图片操作
+│   ├── domain-claim.ts         浏览模式判定与原站回退
+│   ├── domain-entry.tsx        Shadow DOM 生产挂载入口
+│   ├── search-bridge.ts        原站搜索同步与 DOM 结果解析
+│   ├── App.tsx                 信息流、搜索、分区、主题与交互状态
+│   ├── components/             详情、播放器和通用 UI 组件
+│   └── data/                   小黑盒接口映射与表情解析
+├── package.json
 ├── tsconfig.json
-└── package.json
+└── vite.config.ts
 ```
 
-## 在浏览器中调试
+## 在浏览器中调试扩展
 
-1. Chrome 打开 `chrome://extensions/`，Edge 打开 `edge://extensions/`。
-2. 开启“开发者模式”。
-3. 点击“加载已解压的扩展程序”。
-4. 选择本项目的 `dist/` 目录。
-5. 打开并刷新 `https://www.xiaoheihe.cn/app/bbs/home`。
+1. 运行 `npm run build`。
+2. 打开 `chrome://extensions/` 或 `edge://extensions/`。
+3. 开启开发者模式。
+4. 选择“加载已解压的扩展程序”。
+5. 选择本项目的 `dist/` 目录。
+6. 打开并刷新 `https://www.xiaoheihe.cn/app/bbs/home`。
 
-修改代码后，需要重新运行 `npm run build`，在扩展管理页重新加载扩展，再刷新小黑盒页面。
+修改源码后需要重新运行 `npm run build`，在扩展管理页重新加载扩展，再刷新小黑盒页面。
 
 ## 手工生成安装包
 
-压缩包根目录必须直接包含 `manifest.json`，不能在外层多套一层 `dist/`。
+压缩包根目录必须直接包含 `manifest.json`，不能多套一层 `dist/`。
 
-macOS / Linux：
+macOS / Linux:
 
 ```bash
 (cd dist && zip -r ../extension.zip . -x '*.DS_Store')
 ```
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
 Compress-Archive -Path dist\* -DestinationPath extension.zip -Force
 ```
 
-## 更新并发布版本（仅限作者或获授权维护者）
+## 发布版本
 
-正式发布前必须同步修改以下三处版本号：
+正式发布前必须同步修改以下版本号：
 
 - `package.json`
-- `package-lock.json` 顶层及根项目的版本
+- `package-lock.json` 顶层版本和根包版本
 - `public/manifest.json`
 
-随后运行：
+发布前检查：
 
 ```bash
+npm ci
 npm run build
+npm run verify:dist
 ```
 
-确认构建成功后提交代码，并创建与版本号完全一致的标签。例如发布 `0.7.32`：
+创建与版本号一致的标签，例如发布 `0.7.32`：
 
 ```bash
 git tag v0.7.32
@@ -120,21 +123,13 @@ git push origin main
 git push origin v0.7.32
 ```
 
-推送 `v*` 标签后，[Release 工作流](../.github/workflows/release.yml)会自动：
-
-1. 校验标签、`package.json`、锁文件与 Manifest 的版本一致。
-2. 安装依赖并运行完整生产构建。
-3. 将 `dist/` 内部文件打包为 `extension.zip`。
-4. 校验压缩包根目录中的 Manifest 版本。
-5. 创建对应的 GitHub 稳定版 Release，并上传 `extension.zip`。
-
-普通代码提交不会创建 Release。
+推送 `v*` 标签后，Release workflow 会自动安装依赖、构建、验证、打包并发布 `extension.zip`。
 
 ## 常见问题
 
 ### Vite 提示 Node.js 版本不支持
 
-升级到 Node.js `20.19+` 或 `22.12+` 后重新运行 `npm ci`。
+升级到 Node.js `20.19+` 或 `22.12+`，然后重新运行 `npm ci`。
 
 ### 浏览器提示找不到 Manifest
 
@@ -142,8 +137,8 @@ git push origin v0.7.32
 
 ### 修改后页面没有变化
 
-依次执行生产构建、扩展管理页“重新加载”以及小黑盒页面刷新。只刷新网页不会重新载入已更新的扩展脚本。
+依次执行生产构建、扩展管理页“重新加载”、小黑盒页面刷新。只刷新网页不会重新载入已更新的扩展脚本。
 
 ### GitHub Actions 拒绝发布
 
-检查 `v*` 标签和三处项目版本是否完全一致，并确认仓库 Actions 的 `GITHUB_TOKEN` 具有 `contents: write` 权限。
+检查 `v*` 标签、`package.json`、`package-lock.json` 和 `public/manifest.json` 的版本是否完全一致，并确认仓库 Actions 的 `GITHUB_TOKEN` 具有 `contents: write` 权限。

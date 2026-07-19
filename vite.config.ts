@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const fromRoot = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 
 function isolateClassicContentScripts(): Plugin {
-  const entryNames = new Set(["domain-claim", "domain-entry"]);
+  const entryNames = new Set(["domain-claim", "domain-entry", "search-bridge"]);
 
   return {
     name: "isolate-classic-content-scripts",
@@ -35,6 +35,7 @@ export default defineConfig({
       input: {
         "domain-claim": fromRoot("./src/domain-claim.ts"),
         "domain-entry": fromRoot("./src/domain-entry.tsx"),
+        "search-bridge": fromRoot("./src/search-bridge.ts"),
         background: fromRoot("./src/background.ts")
       },
       output: {
@@ -42,6 +43,7 @@ export default defineConfig({
           if (chunk.name === "background") return "background.js";
           if (chunk.name === "domain-claim") return "domain-claim.js";
           if (chunk.name === "domain-entry") return "domain-entry.js";
+          if (chunk.name === "search-bridge") return "search-bridge.js";
           return "assets/[name]-[hash].js";
         },
         chunkFileNames: "assets/[name]-[hash].js",

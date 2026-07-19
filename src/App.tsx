@@ -1,4 +1,4 @@
-import {
+﻿import {
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -16,13 +16,14 @@ import {
   fetchFeedPage,
   fetchMoreComments,
   fetchPostDetail,
+  fetchSearchSuggestions,
+  parseSearchPayload,
   setCommentLiked,
   setPostAuthorFollowing,
   setPostFavorited,
   setPostLiked
 } from "./data/heybox";
 import { DetailViews } from "./components/DetailViews";
-import { GeneratedTextCover } from "./components/GeneratedTextCover";
 import { HeyboxText } from "./components/HeyboxText";
 import { formatCount } from "./format";
 import { ImageContextMenu, type ImageContextMenuState } from "./components/ImageContextMenu";
@@ -39,6 +40,8 @@ import {
 } from "./theme";
 import {
   ArticleIcon,
+  CloseIcon,
+  CommentIcon,
   CompassIcon,
   ExternalIcon,
   FilterIcon,
@@ -70,11 +73,31 @@ export interface AppProps {
 
 const FAVORITES_KEY = "xiaoheishu:favorites";
 const FILTER_KINDS_KEY = "xiaoheishu:selected-post-kinds";
+const SEARCH_HISTORY_KEY = "xiaoheishu:search-history";
+const SEARCH_BRIDGE_RESULT_KEY = "xiaoheishu:search-bridge-result";
+const RECENT_VIEWED_KEY = "xiaoheishu:recent-viewed-posts";
 const FEED_STEP = 30;
 const FEED_BUFFER_PAGES = 3;
 const FEED_REVEAL_DURATION_MS = 180;
 const FEED_REVEAL_STAGGER_MS = 15;
+const SEARCH_STEP = 20;
+const DETAIL_RECOMMENDATION_LIMIT = 6;
+const MAX_SEARCH_HISTORY = 8;
+const MAX_RECENT_VIEWED = 8;
+const ORIGINAL_SEARCH_DISCOVERY = [
+  "无限法则",
+  "英雄联盟",
+  "战地5",
+  "怪物猎人",
+  "刺客信条",
+  "彩虹六号",
+  "Red Dead Redemption",
+  "古墓丽影"
+];
 const ORIGINAL_FORUM_URL = "https://www.xiaoheihe.cn/app/bbs/home";
+const ORIGINAL_SEARCH_URL = "https://www.xiaoheihe.cn/app/search";
+const SEARCH_BRIDGE_PARAM = "xiaoheishu_bridge";
+const SEARCH_BRIDGE_TTL_MS = 60_000;
 export const ORIGINAL_MODE_REQUEST_EVENT = "xiaoheishu:request-original-mode";
 
 function isPostKind(value: unknown): value is PostKind {
@@ -96,11 +119,11 @@ function imageActionError(error: unknown, fallback: string): string {
   if (/notallowed|permission|focus|focused|document is not focused/i.test(message)) {
     return "当前标签页未激活，暂时不能复制图片";
   }
-  if (/too (?:large|big)|过大|太大|exceed|limit/i.test(message)) {
-    return "图片过大，建议使用下载图片";
+  if (/too (?:large|big)|过大|exceed|limit/i.test(message)) {
+    return "Image is too large. Please download it instead";
   }
   if (/decode|decoded|解码|format|格式/i.test(message)) {
-    return "这张图片暂时无法复制，建议使用下载图片";
+    return "This image cannot be copied. Please download it instead";
   }
   return message;
 }
@@ -114,6 +137,143 @@ function mergePosts(current: FeedPost[], incoming: FeedPost[]): FeedPost[] {
     merged.push(post);
   });
   return merged;
+}
+
+function originalSearchUrl(keyword: string, bridgeId?: string): string {
+  const url = new URL(ORIGINAL_SEARCH_URL);
+  const query = keyword.trim();
+  if (query) {
+    url.searchParams.set("q", query);
+    url.searchParams.set("keyword", query);
+  }
+  if (bridgeId) url.searchParams.set(SEARCH_BRIDGE_PARAM, bridgeId);
+  return url.href;
+}
+
+function nextSearchBridgeId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+interface BridgedSearchResult {
+  id?: string;
+  keyword?: string;
+  url?: string;
+  payload?: unknown;
+  error?: string;
+  capturedAt?: number;
+}
+
+function asBridgedSearchResult(value: unknown): BridgedSearchResult | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  return {
+    id: typeof record.id === "string" ? record.id : undefined,
+    keyword: typeof record.keyword === "string" ? record.keyword : undefined,
+    url: typeof record.url === "string" ? record.url : undefined,
+    payload: record.payload,
+    error: typeof record.error === "string" ? record.error : undefined,
+    capturedAt: typeof record.capturedAt === "number" ? record.capturedAt : undefined
+  };
+}
+
+function demoSearchPosts(posts: FeedPost[], keyword: string): FeedPost[] {
+  const query = keyword.trim().toLocaleLowerCase();
+  if (!query) return [];
+  return posts.filter((post) => [
+    post.title,
+    post.excerpt,
+    post.author,
+    post.topic,
+    ...(post.contentTags ?? []).map((tag) => tag.name)
+  ].some((value) => value.toLocaleLowerCase().includes(query)));
+}
+
+function normalizeRecommendationText(value: string): string {
+  return value
+    .toLocaleLowerCase()
+    .replace(/[^\p{Letter}\p{Number}\u4e00-\u9fff]+/gu, " ")
+    .trim();
+}
+
+function recommendationKeywords(post: FeedPost): string[] {
+  const chunks = [
+    post.title,
+    post.excerpt,
+    post.topic,
+    ...(post.contentTags ?? []).map((tag) => tag.name)
+  ];
+  const seen = new Set<string>();
+  chunks
+    .flatMap((chunk) => normalizeRecommendationText(chunk).split(/\s+/))
+    .forEach((token) => {
+      if (token.length >= 2 && !seen.has(token)) seen.add(token);
+    });
+  return Array.from(seen).slice(0, 28);
+}
+
+function recommendationScore(source: FeedPost, candidate: FeedPost): number {
+  if (source.id === candidate.id) return -1;
+  let score = 0;
+  if (source.topicId && candidate.topicId && source.topicId === candidate.topicId) score += 12;
+  if (source.topic && candidate.topic && source.topic === candidate.topic) score += 8;
+  if (source.kind === candidate.kind) score += 1.5;
+
+  const candidateText = normalizeRecommendationText([
+    candidate.title,
+    candidate.excerpt,
+    candidate.topic,
+    ...(candidate.contentTags ?? []).map((tag) => tag.name)
+  ].join(" "));
+  recommendationKeywords(source).forEach((keyword) => {
+    if (candidateText.includes(keyword)) score += keyword.length >= 4 ? 2.2 : 1.1;
+  });
+  score += Math.min(5, Math.log10(candidate.likes + candidate.comments * 2 + 1));
+  return score;
+}
+
+function rankedRecommendations(source: FeedPost, candidates: FeedPost[], limit = DETAIL_RECOMMENDATION_LIMIT): FeedPost[] {
+  return candidates
+    .filter((candidate, index, list) => candidate.id !== source.id && list.findIndex((item) => item.id === candidate.id) === index)
+    .map((candidate) => ({ post: candidate, score: recommendationScore(source, candidate) }))
+    .filter((item) => item.score >= 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((item) => item.post);
+}
+
+function persistLocalValue(key: string, value: unknown) {
+  if (typeof chrome !== "undefined" && chrome.storage?.local) {
+    chrome.storage.local.set({ [key]: value }).catch(() => undefined);
+    return;
+  }
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // The in-memory state still works when local persistence is unavailable.
+  }
+}
+
+function storedLocalValue<T>(key: string, fallback: T, accept: (value: unknown) => value is T): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return fallback;
+    const parsed = JSON.parse(raw) as unknown;
+    return accept(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isStoredFeedPosts(value: unknown): value is FeedPost[] {
+  return Array.isArray(value)
+    && value.every((item) => Boolean(item)
+      && typeof item === "object"
+      && typeof (item as Partial<FeedPost>).id === "string"
+      && typeof (item as Partial<FeedPost>).title === "string");
 }
 
 interface BufferedFeedPages {
@@ -402,7 +562,7 @@ function placeholderPost(id: string): FeedPost {
     title: "正在打开帖子",
     excerpt: "",
     author: "盒友",
-    topic: "小黑盒",
+    topic: "Heybox",
     media: [],
     kind: "image",
     likes: 0,
@@ -422,14 +582,30 @@ function KindBadge({ post }: { post: FeedPost }) {
       </span>
     );
   }
-  if (post.kind === "article") return <span className="kind-badge"><ArticleIcon />文章</span>;
   if (post.media.length > 1) return <span className="kind-badge"><ImageIcon />{post.media.length} 图</span>;
   return null;
 }
 
-function PostCard({ post, coverRatio, eager, revealDelay, likeLoading, onLike, onOpen }: {
+function TopicPill({ post }: { post: FeedPost }) {
+  if (!post.topic) return null;
+  return (
+    <span className="feed-card__topic" title={post.topic}>
+      {post.topicIcon && (
+        <img
+          src={post.topicIcon}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          referrerPolicy="no-referrer"
+        />
+      )}
+      <span>{post.topic}</span>
+    </span>
+  );
+}
+
+function PostCard({ post, eager, revealDelay, likeLoading, onLike, onOpen }: {
   post: FeedPost;
-  coverRatio?: number;
   eager?: boolean;
   revealDelay?: number;
   likeLoading: boolean;
@@ -437,6 +613,11 @@ function PostCard({ post, coverRatio, eager, revealDelay, likeLoading, onLike, o
   onOpen: () => void;
 }) {
   const cover = mediaCover(post);
+  const showMeta = Boolean(post.author || post.avatar || post.comments || post.favorites || post.likes);
+  const metadata = [
+    post.createdAt,
+    post.ipLocation ? `IP ${post.ipLocation}` : ""
+  ].filter(Boolean).join(" · ");
 
   return (
     <article
@@ -454,60 +635,67 @@ function PostCard({ post, coverRatio, eager, revealDelay, likeLoading, onLike, o
         }
       }}
     >
-      <div
-        className="feed-card__cover"
-        style={{ aspectRatio: mediaRatio(post, coverRatio) }}
-      >
-        {cover ? (
-          <img
-            src={cover}
-            alt=""
-            loading={eager ? "eager" : "lazy"}
-            decoding="async"
-            referrerPolicy="no-referrer"
-          />
-        ) : (
-          <GeneratedTextCover title={post.title} />
-        )}
-        <KindBadge post={post} />
-        {post.topic && <span className="topic-chip">{post.topic}</span>}
-        <div className="cover-wash" />
-      </div>
-
       <div className="feed-card__body">
-        <h3><HeyboxText value={post.title} emojiSize={18} preserveLineBreaks={false} /></h3>
-        {post.kind === "article" && post.excerpt && <p><HeyboxText value={post.excerpt} emojiSize={16} /></p>}
-        <div className="feed-card__meta">
-          <div className="author">
-            {post.avatar ? (
-              <img
-                src={post.avatar}
-                alt=""
-                loading="lazy"
-                decoding="async"
-                referrerPolicy="no-referrer"
-              />
-            ) : <span className="author__fallback">盒</span>}
-            <span className="author__name">{post.author}</span>
+        <div className="feed-card__text">
+          <div className="feed-card__kicker">
+            <TopicPill post={post} />
+            <KindBadge post={post} />
+            {metadata && <span>{metadata}</span>}
           </div>
-          <div className="card-actions">
-            <button
-              className={post.isLiked ? "is-active" : ""}
-              type="button"
-              aria-label={post.isLiked ? `取消点赞，当前 ${post.likes} 个赞` : `点赞，当前 ${post.likes} 个赞`}
-              aria-pressed={Boolean(post.isLiked)}
-              aria-busy={likeLoading}
-              disabled={likeLoading}
-              onClick={(event) => {
-                event.stopPropagation();
-                onLike();
-              }}
-            >
-              <ThumbUpIcon />
-              <b>{formatCount(post.likes)}</b>
-            </button>
-          </div>
+          <h3><HeyboxText value={post.title} emojiSize={18} preserveLineBreaks={false} /></h3>
+          {post.excerpt && <p><HeyboxText value={post.excerpt} emojiSize={16} /></p>}
         </div>
+
+        {cover && (
+          <div className="feed-card__thumb">
+            <img
+              src={cover}
+              alt=""
+              loading={eager ? "eager" : "lazy"}
+              decoding="async"
+              referrerPolicy="no-referrer"
+            />
+            {post.media.length > 1 && <span className="feed-card__image-count">{post.media.length} 图</span>}
+          </div>
+        )}
+
+        {showMeta && (
+          <div className="feed-card__meta">
+            <div className="author">
+              {post.avatar ? (
+                <img
+                  src={post.avatar}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  referrerPolicy="no-referrer"
+                />
+              ) : <span className="author__fallback">H</span>}
+              <span className="author__name">{post.author}</span>
+            </div>
+            <div className="feed-card__stats" aria-label="帖子数据">
+              <span><CommentIcon />{formatCount(post.comments)}</span>
+              {typeof post.favorites === "number" && <span>藏 {formatCount(post.favorites)}</span>}
+            </div>
+            <div className="card-actions">
+              <button
+                className={post.isLiked ? "is-active" : ""}
+                type="button"
+                aria-label={post.isLiked ? `取消点赞，当前 ${post.likes} 个赞` : `点赞，当前 ${post.likes} 个赞`}
+                aria-pressed={Boolean(post.isLiked)}
+                aria-busy={likeLoading}
+                disabled={likeLoading}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onLike();
+                }}
+              >
+                <ThumbUpIcon />
+                <b>{formatCount(post.likes)}</b>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </article>
   );
@@ -541,8 +729,8 @@ function BrandWordmark({ compact = false }: { compact?: boolean }) {
     <div
       className={compact ? "brand brand--compact mobile-brand" : "brand"}
       role="img"
-      aria-label="小黑盒"
-      title="HeyNote 小黑书"
+      aria-label="Heybox"
+      title="HeyNote Xiaoheishu"
     >
       <HeyboxLogo className="brand__logo" />
     </div>
@@ -553,7 +741,7 @@ function ModeSwitcher({ compact = false }: { compact?: boolean }) {
   return (
     <section className={`mode-switcher${compact ? " mode-switcher--compact" : ""}`} aria-label="页面显示模式">
       {!compact && <span className="mode-switcher__label">浏览页面</span>}
-      <div className="mode-switcher__control" role="group" aria-label="在原版论坛和小黑书之间切换">
+      <div className="mode-switcher__control" role="group" aria-label="Switch between original forum and HeyNote">
         <button
           className="mode-switcher__option mode-switcher__option--original"
           type="button"
@@ -568,10 +756,9 @@ function ModeSwitcher({ compact = false }: { compact?: boolean }) {
           aria-pressed="true"
           aria-current="page"
           tabIndex={-1}
-          title="当前正在使用小黑书"
+          title="Currently using HeyNote"
         >
-          小黑书
-        </button>
+          Xiaoheishu</button>
       </div>
     </section>
   );
@@ -633,6 +820,18 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   const [hasMore, setHasMore] = useState(!isDemo);
   const [nextOffset, setNextOffset] = useState(FEED_STEP);
   const [lastValue, setLastValue] = useState("");
+  const [searchDraft, setSearchDraft] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchPosts, setSearchPosts] = useState<FeedPost[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchLoadingMore, setSearchLoadingMore] = useState(false);
+  const [searchError, setSearchError] = useState<string>();
+  const [searchHasMore, setSearchHasMore] = useState(false);
+  const [searchNextOffset, setSearchNextOffset] = useState(SEARCH_STEP);
+  const [searchHistory, setSearchHistory] = useState<string[]>([]);
+  const [searchSuggestions, setSearchSuggestions] = useState<string[]>([]);
+  const [recentViewedPosts, setRecentViewedPosts] = useState<FeedPost[]>([]);
   const [hotOrder, setHotOrder] = useState<string[]>([]);
   const [masonryColumnCount, setMasonryColumnCount] = useState(() => feedColumnCount(
     typeof window === "undefined" ? 1200 : window.innerWidth
@@ -642,6 +841,9 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   const [detail, setDetail] = useState<PostDetail>();
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string>();
+  const [detailRecommendations, setDetailRecommendations] = useState<FeedPost[]>([]);
+  const [detailRecommendationsLoading, setDetailRecommendationsLoading] = useState(false);
+  const [detailRecommendationsError, setDetailRecommendationsError] = useState<string>();
   const [followLoading, setFollowLoading] = useState(false);
   const [postActionLoading, setPostActionLoading] = useState<"like" | "favorite">();
   const [favoriteFolders, setFavoriteFolders] = useState<FavoriteFolder[]>([]);
@@ -654,16 +856,24 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   const [imageActionNotice, setImageActionNotice] = useState<{ message: string; error: boolean } | null>(null);
   const favoritesTouched = useRef(false);
   const selectedKindsTouched = useRef(false);
+  const searchHistoryTouched = useRef(false);
+  const recentViewedTouched = useRef(false);
   const themePreferenceTouched = useRef(false);
   const feedScrollRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const searchShellRef = useRef<HTMLDivElement>(null);
   const communityListRef = useRef<HTMLDivElement>(null);
   const kindFilterRef = useRef<HTMLDivElement>(null);
   const loadingRef = useRef(false);
   const loadingGenerationRef = useRef<number | null>(null);
   const feedGenerationRef = useRef(0);
+  const searchGenerationRef = useRef(0);
+  const searchSuggestionGenerationRef = useRef(0);
+  const searchLoadingRef = useRef(false);
+  const activeSearchBridgeIdRef = useRef<string | undefined>(undefined);
   const requestedOffsetsRef = useRef<Set<string>>(new Set());
   const selectedIdRef = useRef<string | undefined>(undefined);
+  const recommendationRequestRef = useRef(0);
   const likingPostIdsRef = useRef<Set<string>>(new Set());
   const postLikeOverridesRef = useRef<Map<string, boolean>>(new Map());
   const commentRequestRef = useRef<string | undefined>(undefined);
@@ -759,6 +969,36 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   }, []);
 
   useEffect(() => {
+    const restore = (value: unknown) => {
+      if (searchHistoryTouched.current || !isStringArray(value)) return;
+      setSearchHistory(value.map((item) => item.trim()).filter(Boolean).slice(0, MAX_SEARCH_HISTORY));
+    };
+
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      chrome.storage.local.get(SEARCH_HISTORY_KEY)
+        .then((result) => restore(result[SEARCH_HISTORY_KEY]))
+        .catch(() => undefined);
+    } else {
+      restore(storedLocalValue(SEARCH_HISTORY_KEY, [], isStringArray));
+    }
+  }, []);
+
+  useEffect(() => {
+    const restore = (value: unknown) => {
+      if (recentViewedTouched.current || !isStoredFeedPosts(value)) return;
+      setRecentViewedPosts(value.slice(0, MAX_RECENT_VIEWED));
+    };
+
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      chrome.storage.local.get(RECENT_VIEWED_KEY)
+        .then((result) => restore(result[RECENT_VIEWED_KEY]))
+        .catch(() => undefined);
+    } else {
+      restore(storedLocalValue(RECENT_VIEWED_KEY, [], isStoredFeedPosts));
+    }
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     const restore = (value: unknown) => {
       if (cancelled || selectedKindsTouched.current || !Array.isArray(value)) return;
@@ -840,6 +1080,362 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     activeButton?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [communities, selectedCommunityId]);
 
+  function clearSearch() {
+    searchGenerationRef.current += 1;
+    searchLoadingRef.current = false;
+    activeSearchBridgeIdRef.current = undefined;
+    setSearchDraft("");
+    setSearchQuery("");
+    setSearchPosts([]);
+    setSearchLoading(false);
+    setSearchLoadingMore(false);
+    setSearchError(undefined);
+    setSearchHasMore(false);
+    setSearchNextOffset(SEARCH_STEP);
+    setSearchSuggestions([]);
+  }
+
+  function rememberSearchQuery(keyword: string) {
+    const query = keyword.trim();
+    if (!query) return;
+    searchHistoryTouched.current = true;
+    setSearchHistory((current) => {
+      const next = [query, ...current.filter((item) => item !== query)].slice(0, MAX_SEARCH_HISTORY);
+      persistLocalValue(SEARCH_HISTORY_KEY, next);
+      return next;
+    });
+  }
+
+  function rememberRecentPost(post: FeedPost) {
+    recentViewedTouched.current = true;
+    setRecentViewedPosts((current) => {
+      const next = [post, ...current.filter((item) => item.id !== post.id)].slice(0, MAX_RECENT_VIEWED);
+      persistLocalValue(RECENT_VIEWED_KEY, next);
+      return next;
+    });
+  }
+
+  function startOriginalSearchBridge(query: string, remember = true) {
+    const bridgeId = nextSearchBridgeId();
+    activeSearchBridgeIdRef.current = bridgeId;
+    searchGenerationRef.current += 1;
+    searchLoadingRef.current = true;
+    if (remember) rememberSearchQuery(query);
+    setView("discover");
+    setSearchDraft(query);
+    setSearchQuery(query);
+    setSearchOpen(false);
+    setSearchError(undefined);
+    setSearchLoading(true);
+    setSearchLoadingMore(false);
+    setSearchPosts([]);
+    setSearchHasMore(false);
+    setSearchNextOffset(SEARCH_STEP);
+    feedScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+      void chrome.runtime.sendMessage({
+        channel: "xiaoheishu-internal",
+        operation: "start-search-bridge-tab",
+        bridgeId,
+        keyword: query
+      }).then((response: { ok?: boolean; error?: string } | undefined) => {
+        if (!response?.ok) throw new Error(response?.error || "Search bridge tab failed");
+      }).catch(() => {
+        window.location.assign(originalSearchUrl(query, bridgeId));
+      });
+      return;
+    }
+    window.location.assign(originalSearchUrl(query, bridgeId));
+  }
+
+  async function runSearch(keyword: string, offset = 0, append = false, remember = true) {
+    const query = keyword.trim();
+    if (!query) {
+      clearSearch();
+      return;
+    }
+
+    if (!isDemo) {
+      if (!append) startOriginalSearchBridge(query, remember);
+      return;
+    }
+
+    const generation = searchGenerationRef.current + 1;
+    searchGenerationRef.current = generation;
+    searchLoadingRef.current = true;
+    if (!append && remember) rememberSearchQuery(query);
+    setView("discover");
+    setSearchQuery(query);
+    setSearchOpen(true);
+    setSearchError(undefined);
+    if (append) setSearchLoadingMore(true);
+    else {
+      feedScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+      setSearchLoading(true);
+      setSearchPosts([]);
+    }
+
+    try {
+      const result = { posts: demoSearchPosts(demoPosts ?? [], query), hasMore: false, nextOffset: 0 };
+      if (searchGenerationRef.current !== generation) return;
+      stageFeedReveal(result.posts, !append);
+      setSearchPosts((current) => append ? mergePosts(current, result.posts) : result.posts);
+      setSearchHasMore(result.hasMore);
+      setSearchNextOffset(result.nextOffset);
+    } catch (error) {
+      if (searchGenerationRef.current !== generation) return;
+      setSearchError(error instanceof Error ? error.message : "搜索结果加载失败");
+      if (!append) {
+        setSearchPosts([]);
+        setSearchHasMore(false);
+      }
+    } finally {
+      if (searchGenerationRef.current === generation) {
+        searchLoadingRef.current = false;
+        setSearchLoading(false);
+        setSearchLoadingMore(false);
+      }
+    }
+  }
+
+  async function loadMoreSearch() {
+    if (isDemo || !searchQuery || searchLoadingRef.current || searchLoading || searchLoadingMore || !searchHasMore) return;
+    await runSearch(searchQuery, searchNextOffset, true);
+  }
+
+  const applyBridgedSearchResult = useCallback((
+    bridged: BridgedSearchResult,
+    requestedBridgeId = activeSearchBridgeIdRef.current
+  ) => {
+    if (requestedBridgeId && bridged.id && bridged.id !== requestedBridgeId) return false;
+    if (bridged.capturedAt && Date.now() - bridged.capturedAt > SEARCH_BRIDGE_TTL_MS) return false;
+
+    activeSearchBridgeIdRef.current = undefined;
+    const query = bridged.keyword?.trim() || searchQuery || searchDraft;
+    searchGenerationRef.current += 1;
+    searchLoadingRef.current = false;
+    setView("discover");
+    setSearchDraft(query);
+    setSearchQuery(query);
+    setSearchOpen(false);
+    setSearchLoading(false);
+    setSearchLoadingMore(false);
+    setSearchHasMore(false);
+    setSearchNextOffset(SEARCH_STEP);
+
+    if (bridged.error || !bridged.payload) {
+      setSearchPosts([]);
+      setSearchError(bridged.error || "原站搜索没有返回可解析的数据");
+      return true;
+    }
+
+    try {
+      const result = parseSearchPayload(bridged.payload, 0, SEARCH_STEP);
+      stageFeedReveal(result.posts, true);
+      setSearchPosts(result.posts);
+      setSearchError(result.posts.length > 0 ? undefined : "原站搜索没有返回帖子结果");
+    } catch (error) {
+      setSearchPosts([]);
+      setSearchError(error instanceof Error ? error.message : "原站搜索结果解析失败");
+    }
+    return true;
+  }, [searchDraft, searchQuery, stageFeedReveal]);
+
+  useEffect(() => {
+    if (isDemo) return;
+    let cancelled = false;
+
+    const hashQuery = location.hash.includes("?")
+      ? location.hash.slice(location.hash.indexOf("?") + 1)
+      : "";
+    const requestedBridgeId = new URLSearchParams(hashQuery).get("search_bridge") || "";
+
+    const clearStoredBridge = () => {
+      if (typeof chrome !== "undefined" && chrome.storage?.local) {
+        chrome.storage.local.remove(SEARCH_BRIDGE_RESULT_KEY).catch(() => undefined);
+        return;
+      }
+      try {
+        window.localStorage.removeItem(SEARCH_BRIDGE_RESULT_KEY);
+      } catch {
+        // Nothing to clear when local storage is unavailable.
+      }
+    };
+
+    const readStoredBridge = async (): Promise<unknown> => {
+      if (typeof chrome !== "undefined" && chrome.storage?.local) {
+        const result = await chrome.storage.local.get(SEARCH_BRIDGE_RESULT_KEY);
+        return result[SEARCH_BRIDGE_RESULT_KEY];
+      }
+      try {
+        const raw = window.localStorage.getItem(SEARCH_BRIDGE_RESULT_KEY);
+        return raw ? JSON.parse(raw) as unknown : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+
+    void readStoredBridge().then((value) => {
+      if (cancelled) return;
+      const bridged = asBridgedSearchResult(value);
+      if (!bridged) return;
+      if (!applyBridgedSearchResult(bridged, requestedBridgeId || undefined)) {
+        if (bridged.capturedAt && Date.now() - bridged.capturedAt > SEARCH_BRIDGE_TTL_MS) clearStoredBridge();
+        return;
+      }
+      clearStoredBridge();
+    }).catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyBridgedSearchResult, isDemo]);
+
+  useEffect(() => {
+    if (isDemo || typeof chrome === "undefined" || !chrome.storage?.onChanged) return;
+
+    const clearStoredBridge = () => {
+      chrome.storage.local.remove(SEARCH_BRIDGE_RESULT_KEY).catch(() => undefined);
+    };
+    const onChanged = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
+      if (areaName !== "local") return;
+      const changed = changes[SEARCH_BRIDGE_RESULT_KEY];
+      const bridged = asBridgedSearchResult(changed?.newValue);
+      if (!bridged || !activeSearchBridgeIdRef.current) return;
+      if (applyBridgedSearchResult(bridged)) clearStoredBridge();
+    };
+
+    chrome.storage.onChanged.addListener(onChanged);
+    return () => chrome.storage.onChanged.removeListener(onChanged);
+  }, [applyBridgedSearchResult, isDemo]);
+
+  useEffect(() => {
+    if (isDemo) return;
+    const activeBridgeId = activeSearchBridgeIdRef.current;
+    if (!activeBridgeId || !searchLoading) return;
+    const timeout = window.setTimeout(() => {
+      if (activeSearchBridgeIdRef.current !== activeBridgeId) return;
+      activeSearchBridgeIdRef.current = undefined;
+      searchLoadingRef.current = false;
+      setSearchLoading(false);
+      setSearchLoadingMore(false);
+      setSearchError("原站搜索暂时没有返回结果，请稍后重试");
+    }, SEARCH_BRIDGE_TTL_MS);
+    return () => window.clearTimeout(timeout);
+  }, [isDemo, searchLoading, searchQuery]);
+
+  useEffect(() => {
+    if (isDemo) return;
+    let cancelled = false;
+
+    const clearStoredBridge = () => {
+      if (typeof chrome !== "undefined" && chrome.storage?.local) {
+        chrome.storage.local.remove(SEARCH_BRIDGE_RESULT_KEY).catch(() => undefined);
+        return;
+      }
+      try {
+        window.localStorage.removeItem(SEARCH_BRIDGE_RESULT_KEY);
+      } catch {
+        // Nothing to clear when local storage is unavailable.
+      }
+    };
+
+    const readStoredBridge = async (): Promise<unknown> => {
+      if (typeof chrome !== "undefined" && chrome.storage?.local) {
+        const result = await chrome.storage.local.get(SEARCH_BRIDGE_RESULT_KEY);
+        return result[SEARCH_BRIDGE_RESULT_KEY];
+      }
+      try {
+        const raw = window.localStorage.getItem(SEARCH_BRIDGE_RESULT_KEY);
+        return raw ? JSON.parse(raw) as unknown : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+
+    void readStoredBridge().then((value) => {
+      if (cancelled) return;
+      const bridged = asBridgedSearchResult(value);
+      if (!bridged || !activeSearchBridgeIdRef.current) return;
+      if (!applyBridgedSearchResult(bridged)) {
+        clearStoredBridge();
+        return;
+      }
+      clearStoredBridge();
+    }).catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyBridgedSearchResult, isDemo, searchLoading]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const searchNode = searchShellRef.current;
+      if (!searchNode || !event.composedPath().includes(searchNode)) setSearchOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSearchOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [searchOpen]);
+
+  useEffect(() => {
+    const query = searchDraft.trim();
+    if (!query) {
+      if (searchQuery) clearSearch();
+      setSearchSuggestions([]);
+      return;
+    }
+    if (!isDemo) return;
+    const timer = window.setTimeout(() => {
+      void runSearch(query, 0, false, false);
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [isDemo, searchDraft]);
+
+  useEffect(() => {
+    const query = searchDraft.trim();
+    const generation = searchSuggestionGenerationRef.current + 1;
+    searchSuggestionGenerationRef.current = generation;
+    if (!query) {
+      setSearchSuggestions([]);
+      return;
+    }
+
+    const timer = window.setTimeout(async () => {
+      if (isDemo) {
+        const localSuggestions = new Set<string>();
+        ORIGINAL_SEARCH_DISCOVERY.forEach((word) => {
+          if (word.toLocaleLowerCase().includes(query.toLocaleLowerCase())) localSuggestions.add(word);
+        });
+        demoSearchPosts(demoPosts ?? [], query).forEach((post) => {
+          if (localSuggestions.size < 8) localSuggestions.add(post.title);
+          if (post.topic && localSuggestions.size < 8) localSuggestions.add(post.topic);
+        });
+        if (searchSuggestionGenerationRef.current === generation) {
+          setSearchSuggestions(Array.from(localSuggestions).slice(0, 8));
+        }
+        return;
+      }
+
+      try {
+        const suggestions = await fetchSearchSuggestions(query);
+        if (searchSuggestionGenerationRef.current === generation) setSearchSuggestions(suggestions);
+      } catch {
+        if (searchSuggestionGenerationRef.current === generation) setSearchSuggestions([]);
+      }
+    }, 220);
+
+    return () => window.clearTimeout(timer);
+  }, [demoPosts, isDemo, searchDraft]);
+
   const loadInitial = useCallback(async () => {
     if (isDemo) return;
     const generation = feedGenerationRef.current + 1;
@@ -913,7 +1509,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
         setLastValue(buffered.lastValue ?? "");
       }
       setFeedError(outcome.error
-        ? outcome.error instanceof Error ? outcome.error.message : "后续内容预加载失败，请稍后重试"
+        ? outcome.error instanceof Error ? outcome.error.message : "More content preload failed, please retry"
         : undefined);
     } catch (error) {
       if (feedGenerationRef.current !== generation) return;
@@ -922,7 +1518,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
         setHasMore(false);
         setFeedError(error instanceof Error ? error.message : "暂时无法读取小黑盒信息流");
       } else {
-        setFeedError(error instanceof Error ? error.message : "后续内容预加载失败，请稍后重试");
+        setFeedError(error instanceof Error ? error.message : "More content preload failed, please retry");
       }
     } finally {
       if (feedGenerationRef.current === generation) {
@@ -934,6 +1530,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   }, [isDemo, selectedCommunityId, stageFeedReveal]);
 
   const refreshDiscover = useCallback(() => {
+    clearSearch();
     setView("discover");
     void loadInitial();
   }, [loadInitial]);
@@ -979,12 +1576,12 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       setLastValue(result.lastValue ?? "");
       if (outcome.error) requestedOffsetsRef.current.delete(requestKey);
       setFeedError(outcome.error
-        ? outcome.error instanceof Error ? outcome.error.message : "下一页加载失败，请稍后重试"
+        ? outcome.error instanceof Error ? outcome.error.message : "Next page failed, please retry"
         : undefined);
     } catch (error) {
       if (feedGenerationRef.current !== generation) return;
       requestedOffsetsRef.current.delete(requestKey);
-      setFeedError(error instanceof Error ? error.message : "下一页加载失败，请稍后重试");
+      setFeedError(error instanceof Error ? error.message : "Next page failed, please retry");
     } finally {
       if (loadingGenerationRef.current === generation) {
         loadingGenerationRef.current = null;
@@ -994,12 +1591,17 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     }
   }, [hasMore, initialLoading, isDemo, lastValue, nextOffset, selectedCommunityId, selectedKinds.size, stageFeedReveal]);
 
+  const searchActive = searchQuery.trim().length > 0;
+
   useEffect(() => {
     const target = sentinelRef.current;
     const root = feedScrollRef.current;
     if (!target || !root || isDemo) return;
+    const requestMore = () => {
+      void (searchActive ? loadMoreSearch() : loadMore());
+    };
     const observer = new IntersectionObserver((entries) => {
-      if (entries[0]?.isIntersecting) void loadMore();
+      if (entries[0]?.isIntersecting) requestMore();
     }, { root, rootMargin: "300px 0px", threshold: 0.01 });
     observer.observe(target);
     let checkFrame = 0;
@@ -1007,12 +1609,12 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       checkFrame = 0;
       const columns = Array.from(root.querySelectorAll<HTMLElement>(".masonry-column"));
       if (!columns.length) {
-        if (root.scrollHeight - root.scrollTop - root.clientHeight < 320) void loadMore();
+        if (root.scrollHeight - root.scrollTop - root.clientHeight < 320) requestMore();
         return;
       }
       const viewportBottom = root.getBoundingClientRect().bottom;
       const shortestColumnBottom = Math.min(...columns.map((column) => column.getBoundingClientRect().bottom));
-      if (shortestColumnBottom - viewportBottom <= root.clientHeight * 1.5) void loadMore();
+      if (shortestColumnBottom - viewportBottom <= root.clientHeight * 1.5) requestMore();
     };
     const scheduleDistanceCheck = () => {
       if (!checkFrame) checkFrame = window.requestAnimationFrame(checkDistance);
@@ -1028,7 +1630,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       resizeObserver?.disconnect();
       observer.disconnect();
     };
-  }, [isDemo, loadMore]);
+  }, [isDemo, loadMore, searchActive, searchHasMore, searchLoading, searchLoadingMore, searchNextOffset, searchQuery]);
 
   useEffect(() => {
     if (view !== "hot") return;
@@ -1042,13 +1644,42 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     });
   }, [posts, view]);
 
+  const feedInitialBusy = searchActive ? searchLoading && searchPosts.length === 0 : initialLoading;
+  const activeFeedError = searchActive ? searchError : feedError;
+  const activeHasMore = searchActive ? searchHasMore : hasMore;
+  const activeLoadingMore = searchActive ? searchLoadingMore : loadingMore;
+  const activeSourcePosts = searchActive ? searchPosts : posts;
+
+  const searchPanelSuggestions = useMemo(() => {
+    const query = searchDraft.trim().toLocaleLowerCase();
+    if (!query) return [];
+    if (searchSuggestions.length) return searchSuggestions;
+
+    const labels = new Set<string>();
+    [...searchPosts, ...posts].forEach((post) => {
+      for (const value of [post.topic, post.author, post.title]) {
+        if (!value || labels.size >= 6) continue;
+        if (value.toLocaleLowerCase().includes(query)) labels.add(value);
+      }
+    });
+    return Array.from(labels).slice(0, 6);
+  }, [posts, searchDraft, searchPosts, searchSuggestions]);
+
+  const searchDiscoveryChips = ORIGINAL_SEARCH_DISCOVERY;
+
+  const searchPreviewPosts = useMemo(() => {
+    if (searchActive) return searchPosts.slice(0, 4);
+    const query = searchDraft.trim();
+    return query ? demoSearchPosts(posts, query).slice(0, 4) : recentViewedPosts.slice(0, 4);
+  }, [posts, recentViewedPosts, searchActive, searchDraft, searchPosts]);
+
   const visiblePosts = useMemo(() => {
-    const result = posts.filter((post) => {
-      if (view === "saved" && !favorites.has(post.id)) return false;
+    const result = activeSourcePosts.filter((post) => {
+      if (!searchActive && view === "saved" && !favorites.has(post.id)) return false;
       if (!selectedKinds.has(post.kind)) return false;
       return true;
     });
-    if (view !== "hot") return result;
+    if (searchActive || view !== "hot") return result;
 
     const orderById = new Map(hotOrder.map((id, index) => [id, index]));
     const ranked: FeedPost[] = [];
@@ -1060,13 +1691,14 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     ranked.sort((a, b) => (orderById.get(a.id) ?? 0) - (orderById.get(b.id) ?? 0));
     additions.sort((a, b) => hotScore(b) - hotScore(a));
     return [...ranked, ...additions];
-  }, [favorites, hotOrder, posts, selectedKinds, view]);
+  }, [activeSourcePosts, favorites, hotOrder, searchActive, selectedKinds, view]);
 
   const masonryColumns = useMemo(() => {
     return distributeFeedPosts(visiblePosts, masonryColumnCount, feedCoverRatiosRef.current);
   }, [masonryColumnCount, visiblePosts]);
 
   function selectCommunity(communityId: string | null) {
+    if (searchQuery || searchDraft) clearSearch();
     if (communityId === selectedCommunityId) return;
     if (isDemo) {
       setSelectedCommunityId(communityId);
@@ -1123,6 +1755,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   }
 
   function resetFeedSelection() {
+    clearSearch();
     setView("discover");
     selectAllKinds();
     setFilterOpen(false);
@@ -1141,12 +1774,69 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     });
   }
 
+  function resetDetailRecommendations() {
+    recommendationRequestRef.current += 1;
+    setDetailRecommendations([]);
+    setDetailRecommendationsLoading(false);
+    setDetailRecommendationsError(undefined);
+  }
+
+  function communityForPost(post: FeedPost): Community | undefined {
+    const topicId = post.topicId?.trim();
+    if (topicId) {
+      const byId = communities.find((community) => community.id === topicId);
+      if (byId) return byId;
+      if (post.topic) return { id: topicId, name: post.topic, iconUrl: post.topicIcon };
+    }
+    const topicName = post.topic.trim();
+    if (!topicName) return undefined;
+    return communities.find((community) => community.name === topicName);
+  }
+
+  const loadDetailRecommendations = useCallback(async (post: FeedPost) => {
+    const requestId = recommendationRequestRef.current + 1;
+    recommendationRequestRef.current = requestId;
+    setDetailRecommendations([]);
+    setDetailRecommendationsError(undefined);
+
+    const community = communityForPost(post);
+    const candidateFallback = [...posts, ...searchPosts, ...recentViewedPosts];
+    if (isDemo) {
+      setDetailRecommendations(rankedRecommendations(post, demoPosts ?? candidateFallback));
+      setDetailRecommendationsLoading(false);
+      return;
+    }
+
+    if (!community) {
+      setDetailRecommendations(rankedRecommendations(post, candidateFallback));
+      setDetailRecommendationsLoading(false);
+      return;
+    }
+
+    setDetailRecommendationsLoading(true);
+    try {
+      const width = Math.min(Math.max(window.innerWidth - 260, 520), 1180);
+      const page = await fetchFeedPage(0, width, community.id, "");
+      if (recommendationRequestRef.current !== requestId) return;
+      const mergedCandidates = mergePosts(page.posts, candidateFallback);
+      setDetailRecommendations(rankedRecommendations(post, mergedCandidates));
+    } catch (error) {
+      if (recommendationRequestRef.current !== requestId) return;
+      setDetailRecommendations(rankedRecommendations(post, candidateFallback));
+      setDetailRecommendationsError(error instanceof Error ? error.message : "相关推荐加载失败");
+    } finally {
+      if (recommendationRequestRef.current === requestId) setDetailRecommendationsLoading(false);
+    }
+  }, [communities, demoPosts, isDemo, posts, recentViewedPosts, searchPosts]);
+
   const loadDetail = useCallback(async (post: FeedPost, navigate = true) => {
+    rememberRecentPost(post);
     selectedIdRef.current = post.id;
     setSelectedPost(post);
     setDetail(undefined);
     setDetailError(undefined);
     setDetailLoading(true);
+    resetDetailRecommendations();
     setFollowLoading(false);
     setPostActionLoading(undefined);
     setFavoritePickerOpen(false);
@@ -1160,13 +1850,14 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
 
     try {
       const nextDetail = isDemo ? demoDetails[post.id] : await fetchPostDetail(post.id, post);
-      if (!nextDetail) throw new Error("这个样稿帖子还没有详情数据");
+      if (!nextDetail) throw new Error("No detail data for this post yet");
       if (selectedIdRef.current !== post.id) return;
       const localLikeState = postLikeOverridesRef.current.get(post.id);
       setDetail(localLikeState === undefined ? nextDetail : {
         ...nextDetail,
         post: withPostLikeState(nextDetail.post, localLikeState)
       });
+      void loadDetailRecommendations(nextDetail.post);
       history.replaceState({
         ...(history.state ?? {}),
         xiaoheishuDetail: navigate || history.state?.xiaoheishuDetail === true
@@ -1178,7 +1869,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     } finally {
       if (selectedIdRef.current === post.id) setDetailLoading(false);
     }
-  }, [demoDetails, isDemo]);
+  }, [demoDetails, isDemo, loadDetailRecommendations]);
 
   useEffect(() => {
     if (!location.hash) history.replaceState(history.state, "", "#/feed");
@@ -1189,6 +1880,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
         setSelectedPost(undefined);
         setDetail(undefined);
         setDetailError(undefined);
+        resetDetailRecommendations();
         setFollowLoading(false);
         setPostActionLoading(undefined);
         setFavoritePickerOpen(false);
@@ -1219,6 +1911,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     setDetail(undefined);
     setDetailError(undefined);
     setDetailLoading(false);
+    resetDetailRecommendations();
     setFollowLoading(false);
     setPostActionLoading(undefined);
     setFavoritePickerOpen(false);
@@ -1233,6 +1926,40 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     history.replaceState(history.state, "", "#/feed");
   }
 
+  function openPostTopic(post: FeedPost) {
+    const community = communityForPost(post);
+    if (!community) {
+      showImageActionNotice("No available topic information for this post", true);
+      return;
+    }
+
+    if (!communities.some((item) => item.id === community.id)) {
+      setCommunities((current) => current.some((item) => item.id === community.id)
+        ? current
+        : [community, ...current]);
+    }
+
+    selectedIdRef.current = undefined;
+    setSelectedPost(undefined);
+    setDetail(undefined);
+    setDetailError(undefined);
+    setDetailLoading(false);
+    resetDetailRecommendations();
+    setFollowLoading(false);
+    setPostActionLoading(undefined);
+    setFavoritePickerOpen(false);
+    setFavoriteFolders([]);
+    setLikingCommentIds(new Set());
+    replyRequestKeysRef.current.clear();
+    setLoadingReplyIds(new Set());
+    setSearchOpen(false);
+    setFilterOpen(false);
+    setView("discover");
+    selectAllKinds();
+    history.replaceState({ ...(history.state ?? {}), xiaoheishuDetail: false }, "", "#/feed");
+    selectCommunity(community.id);
+  }
+
   async function toggleSelectedAuthorFollow() {
     if (!detail || followLoading) return;
     const linkId = detail.post.id;
@@ -1240,7 +1967,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     const nextFollowing = !Boolean(detail.post.isFollowing);
 
     if (!isDemo && !followingId) {
-      showImageActionNotice("这个帖子没有返回作者 ID，暂时无法关注", true);
+      showImageActionNotice("This post has no author id, so follow is unavailable", true);
       return;
     }
 
@@ -1261,10 +1988,10 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
           ? { ...post, isFollowing: nextFollowing }
           : post
       )));
-      showImageActionNotice(nextFollowing ? `已关注 ${detail.post.author}` : `已取消关注 ${detail.post.author}`);
+      showImageActionNotice(nextFollowing ? `Followed ${detail.post.author}` : `Unfollowed ${detail.post.author}`);
     } catch (error) {
       if (selectedIdRef.current === linkId) {
-        showImageActionNotice(error instanceof Error ? error.message : "关注状态更新失败", true);
+        showImageActionNotice(error instanceof Error ? error.message : "Follow state update failed", true);
       }
     } finally {
       if (selectedIdRef.current === linkId) setFollowLoading(false);
@@ -1309,13 +2036,13 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       // target again brings that newly loaded copy in sync without double-counting.
       applyPostLikeState(linkId, nextLiked);
       if (!selectedIdRef.current || selectedIdRef.current === linkId) {
-        showImageActionNotice(nextLiked ? "已点赞" : "已取消点赞");
+        showImageActionNotice(nextLiked ? "Liked" : "Unliked");
       }
     } catch (error) {
       postLikeOverridesRef.current.delete(linkId);
       applyPostLikeState(linkId, previousLiked);
       if (!selectedIdRef.current || selectedIdRef.current === linkId) {
-        showImageActionNotice(error instanceof Error ? error.message : "点赞状态更新失败", true);
+        showImageActionNotice(error instanceof Error ? error.message : "Like state update failed", true);
       }
     } finally {
       setPostLikePending(linkId, false);
@@ -1353,7 +2080,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       } catch (error) {
         if (selectedIdRef.current === linkId) {
           setPostActionLoading(undefined);
-          showImageActionNotice(error instanceof Error ? error.message : "收藏夹加载失败", true);
+          showImageActionNotice(error instanceof Error ? error.message : "Favorite folders failed to load", true);
         }
         return;
       }
@@ -1369,11 +2096,11 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     try {
       if (!isDemo) await setPostFavorited(linkId, nextFavorited, selectedFolderId);
       setLocalFavorite(linkId, nextFavorited);
-      if (selectedIdRef.current === linkId) showImageActionNotice(nextFavorited ? "已收藏" : "已取消收藏");
+      if (selectedIdRef.current === linkId) showImageActionNotice(nextFavorited ? "Favorited" : "Unfavorited");
     } catch (error) {
       updatePostAcrossViews(linkId, rollback);
       if (selectedIdRef.current === linkId) {
-        showImageActionNotice(error instanceof Error ? error.message : "收藏状态更新失败", true);
+        showImageActionNotice(error instanceof Error ? error.message : "Favorite state update failed", true);
       }
     } finally {
       if (selectedIdRef.current === linkId) setPostActionLoading(undefined);
@@ -1407,7 +2134,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
         comments: updateComment(current.comments, commentId, updateTarget(previousLiked, previousLikes))
       } : current);
       if (selectedIdRef.current === linkId) {
-        showImageActionNotice(error instanceof Error ? error.message : "评论点赞状态更新失败", true);
+        showImageActionNotice(error instanceof Error ? error.message : "Comment like update failed", true);
       }
     } finally {
       setLikingCommentIds((current) => {
@@ -1484,7 +2211,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       setDetailError(undefined);
     } catch (error) {
       if (selectedIdRef.current === linkId) {
-        setDetailError(error instanceof Error ? error.message : "子回复加载失败");
+        setDetailError(error instanceof Error ? error.message : "Replies failed to load");
       }
     } finally {
       if (replyRequestKeysRef.current.get(rootCommentId) === requestKey) {
@@ -1504,7 +2231,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
         <aside className="sidebar">
           <BrandWordmark />
 
-          <nav className="side-nav" aria-label="信息流导航">
+          <nav className="side-nav" aria-label="Feed navigation">
             <button
               className="active"
               aria-current="page"
@@ -1513,7 +2240,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
           </nav>
 
           <div className="sidebar__bottom">
-            <section className="sidebar-settings" aria-label="小黑书设置">
+            <section className="sidebar-settings" aria-label="HeyNote settings">
               <ThemeSwitcher preference={themePreference} onChange={selectThemePreference} />
               <ModeSwitcher />
             </section>
@@ -1523,13 +2250,146 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
         <main className="main-panel">
           <header className="topbar">
             <BrandWordmark compact />
-            <div className="search-box is-disabled" aria-disabled="true" title="搜索功能暂未开放">
-              <SearchIcon />
-              <input disabled value="" aria-label="搜索功能暂未开放" placeholder="搜索功能暂未开放" />
+            <div className="search-shell" ref={searchShellRef}>
+              <form
+                className={`search-box${searchOpen ? " is-open" : ""}${searchActive ? " is-active" : ""}`}
+                role="search"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void runSearch(searchDraft);
+                }}
+              >
+                <SearchIcon />
+                <input
+                  value={searchDraft}
+                  aria-label="Search Heybox posts"
+                  placeholder="Search posts, communities, players"
+                  onFocus={() => setSearchOpen(true)}
+                  onChange={(event) => setSearchDraft(event.target.value)}
+                />
+                {(searchDraft || searchActive) && (
+                  <button
+                    className="search-box__clear"
+                    type="button"
+                    aria-label="清空搜索"
+                    title="清空搜索"
+                    onClick={clearSearch}
+                  >
+                    <CloseIcon />
+                  </button>
+                )}
+              </form>
+
+              {searchOpen && (
+                <div className="search-panel" role="dialog" aria-label="Search panel">
+                  <div className="search-panel__head">
+                    <strong>{searchDraft.trim() || "Search Heybox"}</strong>
+                    <a href={originalSearchUrl(searchDraft || searchQuery)} target="_blank" rel="noreferrer">
+                      原站打开
+                      <ExternalIcon />
+                    </a>
+                  </div>
+
+                  {searchDraft.trim() ? (
+                    searchPanelSuggestions.length > 0 && (
+                      <div className="search-panel__chips" aria-label="搜索建议">
+                        <span>搜索建议</span>
+                        {searchPanelSuggestions.map((label) => (
+                          <button
+                            type="button"
+                            key={label}
+                            onClick={() => {
+                              setSearchDraft(label);
+                              void runSearch(label);
+                            }}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    )
+                  ) : (
+                    <>
+                      {searchHistory.length > 0 && (
+                        <div className="search-panel__chips" aria-label="搜索历史">
+                          <span>搜索历史</span>
+                          {searchHistory.map((label) => (
+                            <button
+                              type="button"
+                              key={label}
+                              onClick={() => {
+                                setSearchDraft(label);
+                                void runSearch(label);
+                              }}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="search-panel__chips" aria-label="搜索发现">
+                        <span>搜索发现</span>
+                        {searchDiscoveryChips.map((label) => (
+                          <button
+                            type="button"
+                            key={label}
+                            onClick={() => {
+                              setSearchDraft(label);
+                              void runSearch(label);
+                            }}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+
+                  <div className="search-panel__status" aria-live="polite">
+                    {searchLoading
+                      ? "正在同步搜索结果"
+                      : searchError
+                        ? searchError
+                        : searchActive
+                          ? `${searchPosts.length} 条结果`
+                          : recentViewedPosts.length > 0 ? "最近浏览" : "还没有最近浏览"}
+                  </div>
+
+                  {searchPreviewPosts.length > 0 && (
+                    <div className="search-panel__results">
+                      {searchPreviewPosts.map((post) => (
+                        <button
+                          type="button"
+                          key={post.id}
+                          onClick={() => {
+                            setSearchOpen(false);
+                            void loadDetail(post);
+                          }}
+                        >
+                          <span>
+                            {post.topicIcon && (
+                              <img
+                                src={post.topicIcon}
+                                alt=""
+                                loading="lazy"
+                                decoding="async"
+                                referrerPolicy="no-referrer"
+                              />
+                            )}
+                            <span>{post.topic}</span>
+                          </span>
+                          <strong><HeyboxText value={post.title} emojiSize={14} preserveLineBreaks={false} /></strong>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="top-actions">
-              <button type="button" onClick={refreshDiscover} disabled={initialLoading || isDemo} title="刷新信息流"><RefreshIcon className={initialLoading ? "spin" : ""} /></button>
-              <button type="button" onClick={requestOriginalMode} title="切换到原版论坛"><ExternalIcon /></button>
+              <button type="button" onClick={refreshDiscover} disabled={feedInitialBusy || isDemo} title="Refresh feed"><RefreshIcon className={feedInitialBusy ? "spin" : ""} /></button>
+              <button type="button" onClick={requestOriginalMode} title="Switch to original forum"><ExternalIcon /></button>
             </div>
           </header>
 
@@ -1538,7 +2398,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
               <div
                 className="community-list"
                 ref={communityListRef}
-                aria-label="社区信息流"
+                aria-label="Community feed"
                 aria-busy={!isDemo && communities.length === 0 && !communityError}
               >
                 <button
@@ -1548,6 +2408,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
                   aria-pressed={selectedCommunityId === null}
                   onClick={() => selectCommunity(null)}
                 >
+                  <span className="community-list__icon community-list__icon--all" aria-hidden="true">全</span>
                   全部
                 </button>
                 {communities.map((community) => (
@@ -1559,6 +2420,16 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
                     aria-pressed={selectedCommunityId === community.id}
                     onClick={() => selectCommunity(community.id)}
                   >
+                    {community.iconUrl && (
+                      <img
+                        className="community-list__icon"
+                        src={community.iconUrl}
+                        alt=""
+                        loading="lazy"
+                        decoding="async"
+                        referrerPolicy="no-referrer"
+                      />
+                    )}
                     {community.name}
                   </button>
                 ))}
@@ -1582,10 +2453,10 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
                 </button>
 
                 {filterOpen && (
-                  <div className="feed-kind-filter__popover" role="dialog" aria-label="筛选内容类型">
+                  <div className="feed-kind-filter__popover" role="dialog" aria-label="Filter content types">
                     <div className="feed-kind-filter__heading">
                       <strong>内容类型</strong>
-                      <button type="button" onClick={selectAllKinds}>全选</button>
+                      <button type="button" onClick={selectAllKinds}>全部</button>
                     </div>
                     <div className="feed-kind-filter__options" role="group" aria-label="可见内容类型">
                       {KIND_FILTER_OPTIONS.map(({ key, label, icon: Icon }) => (
@@ -1607,18 +2478,18 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
               </div>
             </div>
 
-            {feedError && (
+            {activeFeedError && (
               <div className="feed-notice is-error">
-                <div><strong>{posts.length ? "下一页暂时没有加载成功" : "没有拿到信息流"}</strong><span>{feedError}</span></div>
-                <button type="button" onClick={() => void (posts.length ? loadMore() : loadInitial())}>{posts.length ? "重试本页" : "重新连接"}</button>
+                <div><strong>{activeSourcePosts.length ? "下一页暂时没有加载成功" : searchActive ? "没有拿到搜索结果" : "没有拿到信息流"}</strong><span>{activeFeedError}</span></div>
+                <button type="button" onClick={() => void (searchActive ? runSearch(searchQuery) : activeSourcePosts.length ? loadMore() : loadInitial())}>{activeSourcePosts.length ? "重试本页" : "重新连接"}</button>
               </div>
             )}
 
-            {initialLoading ? <FeedSkeleton columns={masonryColumnCount} /> : visiblePosts.length ? (
+            {feedInitialBusy ? <FeedSkeleton columns={masonryColumnCount} /> : visiblePosts.length ? (
               <section
                 className="masonry-feed"
                 aria-live="polite"
-                aria-busy={loadingMore}
+                aria-busy={activeLoadingMore}
                 style={{ gridTemplateColumns: `repeat(${masonryColumnCount}, minmax(0, 1fr))` }}
               >
                 {masonryColumns.map((columnPosts, columnIndex) => (
@@ -1627,8 +2498,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
                       <PostCard
                         key={post.id}
                         post={post}
-                        coverRatio={feedCoverRatiosRef.current.get(post.id)}
-                        eager={rowIndex < 2}
+                        eager={rowIndex < 3}
                         revealDelay={feedRevealDelays.get(post.id)}
                         likeLoading={likingPostIds.has(post.id)}
                         onLike={() => void togglePostLike(post)}
@@ -1638,22 +2508,24 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
                   </div>
                 ))}
               </section>
-            ) : !feedError ? (
+            ) : !activeFeedError ? (
               <section className="empty-state">
-                <span>空</span>
-                <h2>{view === "saved" ? "还没有收藏帖子" : "这里暂时没有内容"}</h2>
-                <p>{view === "saved"
-              ? "在帖子详情里点收藏，帖子就会留在这里。"
+                <span>Empty</span>
+                <h2>{searchActive ? "没有找到相关帖子" : view === "saved" ? "还没有收藏帖子" : "这里还没有内容"}</h2>
+                <p>{searchActive
+                  ? "可以换个关键词再试。"
+                  : view === "saved"
+              ? "在帖子详情里收藏后会显示在这里。"
                   : selectedKinds.size === 0
-                    ? "当前三个内容类型都已取消勾选。"
-                    : "换一个社区或内容类型试试。"}</p>
-                <button type="button" onClick={resetFeedSelection}>{selectedKinds.size === 0 ? "显示全部类型" : "回到推荐"}</button>
+                    ? "所有内容类型都被隐藏了。"
+                    : "可以换个分区或内容类型看看。"}</p>
+                <button type="button" onClick={resetFeedSelection}>{searchActive ? "回到推荐" : selectedKinds.size === 0 ? "显示全部类型" : "回到推荐"}</button>
               </section>
             ) : null}
 
             <div className="feed-sentinel" ref={sentinelRef}>
-              {loadingMore && <><i /><span>正在加载下一页</span></>}
-              {!hasMore && posts.length > 0 && <span>已经看到这一批内容的末尾</span>}
+              {activeLoadingMore && <><i /><span>正在加载下一页</span></>}
+              {!activeHasMore && activeSourcePosts.length > 0 && <span>{searchActive ? "搜索结果已到底" : "当前信息流已到底"}</span>}
             </div>
           </div>
 
@@ -1698,6 +2570,11 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
           onLoadMoreReplies={isDemo ? undefined : (rootCommentId) => void loadMoreReplies(rootCommentId)}
           loadingReplyIds={loadingReplyIds}
           onImageContextMenu={openImageContextMenu}
+          recommendations={detailRecommendations}
+          recommendationsLoading={detailRecommendationsLoading}
+          recommendationsError={detailRecommendationsError}
+          onOpenRecommendation={(post) => void loadDetail(post)}
+          onOpenTopic={openPostTopic}
         />
       )}
 
@@ -1707,14 +2584,14 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
           onClose={closeImageContextMenu}
           onCopy={(target) => {
             void copyImageAction(target).then(() => {
-              showImageActionNotice("图片已复制");
+              showImageActionNotice("Image copied");
             }).catch((error) => {
               showImageActionNotice(imageActionError(error, "图片复制失败"), true);
             });
           }}
           onDownload={(target) => {
             void downloadImageAction(target).then(() => {
-              showImageActionNotice("已开始下载");
+              showImageActionNotice("Download started");
             }).catch((error) => {
               showImageActionNotice(imageActionError(error, "图片下载失败"), true);
             });
@@ -1730,3 +2607,4 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     </div>
   );
 }
+

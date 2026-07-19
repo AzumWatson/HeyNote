@@ -22,7 +22,7 @@ import type {
 import { resolveOriginalImageUrl } from "../data/heybox";
 import { heyboxEmojiFromCode, heyboxEmojiFromId, heyboxEmojiSprite } from "../data/heybox-emoji";
 import { formatCount } from "../format";
-import { CommentIcon, StarIcon, ThumbUpIcon } from "../icons";
+import { CloseIcon, CommentIcon, ExternalIcon, StarIcon, ThumbUpIcon } from "../icons";
 import type { ImageActionTarget } from "../image-actions";
 import { GeneratedTextCover } from "./GeneratedTextCover";
 import { HeyboxText } from "./HeyboxText";
@@ -50,6 +50,11 @@ export interface DetailViewsProps {
   onLoadMoreReplies?: (rootCommentId: string) => void;
   loadingReplyIds?: ReadonlySet<string>;
   onImageContextMenu: ImageContextMenuHandler;
+  recommendations?: FeedPost[];
+  recommendationsLoading?: boolean;
+  recommendationsError?: string;
+  onOpenRecommendation?: (post: FeedPost) => void;
+  onOpenTopic?: (post: FeedPost) => void;
 }
 
 interface ImageLightboxState {
@@ -922,6 +927,135 @@ function PostContentTags({ tags }: { tags?: FeedPost["contentTags"] }) {
   );
 }
 
+function PostTopicBadge({ post, className = "", onOpen }: { post: FeedPost; className?: string; onOpen?: (post: FeedPost) => void }) {
+  if (!post.topic) return null;
+  const content = (
+    <>
+      {post.topicIcon && (
+        <img
+          src={post.topicIcon}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          referrerPolicy="no-referrer"
+        />
+      )}
+      <span>{post.topic}</span>
+    </>
+  );
+  if (onOpen) {
+    return (
+      <button
+        className={`post-topic-badge post-topic-badge--button ${className}`.trim()}
+        type="button"
+        title={post.topic}
+        onClick={() => onOpen(post)}
+      >
+        {content}
+      </button>
+    );
+  }
+  return (
+    <span className={`post-topic-badge ${className}`.trim()} title={post.topic}>
+      {content}
+    </span>
+  );
+}
+
+function recommendationCover(post: FeedPost): string | undefined {
+  const media = post.media[0];
+  if (!media) return undefined;
+  if (media.kind === "image") return media.thumbnail || media.url;
+  return media.poster;
+}
+
+function DetailRecommendationRail({
+  detail,
+  recommendations = [],
+  loading = false,
+  error,
+  onOpenRecommendation,
+  onOpenTopic
+}: {
+  detail: PostDetail;
+  recommendations?: FeedPost[];
+  loading?: boolean;
+  error?: string;
+  onOpenRecommendation?: (post: FeedPost) => void;
+  onOpenTopic?: (post: FeedPost) => void;
+}) {
+  const topicButtonDisabled = !detail.post.topic;
+  return (
+    <aside className="article-reader__rail" aria-label="分区和相关推荐">
+      <section className="article-reader__rail-section article-reader__topic-card">
+        <span className="article-reader__rail-label">所在分区</span>
+        <button
+          type="button"
+          className="article-reader__topic-entry"
+          disabled={topicButtonDisabled}
+          onClick={() => onOpenTopic?.(detail.post)}
+        >
+          {detail.post.topicIcon ? (
+            <img
+              src={detail.post.topicIcon}
+              alt=""
+              loading="lazy"
+              decoding="async"
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <span className="article-reader__topic-entry-fallback">#</span>
+          )}
+          <strong>{detail.post.topic || "未知分区"}</strong>
+          <span className="article-reader__topic-entry-action">查看</span>
+        </button>
+      </section>
+
+      <section className="article-reader__rail-section">
+        <div className="article-reader__rail-head">
+          <strong>相关推荐</strong>
+          {loading && <span>同步中</span>}
+        </div>
+        {error && <p className="article-reader__rail-error">{error}</p>}
+        <div className="article-reader__recommendations">
+          {recommendations.map((post) => {
+            const cover = recommendationCover(post);
+            return (
+              <button
+                type="button"
+                key={post.id}
+                className="article-reader__recommendation"
+                onClick={() => onOpenRecommendation?.(post)}
+              >
+                <span className="article-reader__recommendation-text">
+                  <strong><HeyboxText value={post.title} emojiSize={14} preserveLineBreaks={false} /></strong>
+                  <small>
+                    <span>{post.topic}</span>
+                    <span><ThumbUpIcon />{formatCount(post.likes)}</span>
+                    <span><CommentIcon />{formatCount(post.comments)}</span>
+                  </small>
+                </span>
+                {cover && (
+                  <img
+                    src={cover}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                    referrerPolicy="no-referrer"
+                  />
+                )}
+              </button>
+            );
+          })}
+        </div>
+        {!loading && !recommendations.length && !error && (
+          <p className="article-reader__rail-empty">暂无相关推荐</p>
+        )}
+      </section>
+    </aside>
+  );
+}
+
 function CommentContent({ comment }: { comment: CommentItem }) {
   if (!comment.text) return null;
   return <HeyboxText value={comment.text} emojiClassName="comment-entry__emoji" />;
@@ -1234,6 +1368,7 @@ function ImageGallery({
   images,
   title,
   topic,
+  topicIcon,
   onImageOpen,
   onImageContextMenu,
   onFirstImageDimensions
@@ -1241,6 +1376,7 @@ function ImageGallery({
   images: ImageMedia[];
   title: string;
   topic?: string;
+  topicIcon?: string;
   onImageOpen: OpenImageLightbox;
   onImageContextMenu: ImageContextMenuHandler;
   onFirstImageDimensions?: (image: ImageMedia, width: number, height: number) => void;
@@ -1436,7 +1572,12 @@ function ImageGallery({
         aria-label={`${title}的文字封面${topic ? `，社区：${topic}` : ""}`}
       >
         <GeneratedTextCover title={title} variant="detail" />
-        {topic && <span className="topic-chip topic-chip--detail">{topic}</span>}
+        {topic && (
+          <span className="topic-chip topic-chip--detail">
+            {topicIcon && <img src={topicIcon} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" />}
+            <span>{topic}</span>
+          </span>
+        )}
         <div className="cover-wash" />
       </div>
     );
@@ -2092,7 +2233,12 @@ function DetailSide({
   onLoadMoreReplies,
   loadingReplyIds,
   onImageOpen,
-  onImageContextMenu
+  onImageContextMenu,
+  recommendations,
+  recommendationsLoading,
+  recommendationsError,
+  onOpenRecommendation,
+  onOpenTopic
 }: {
   detail: PostDetail;
   commentsOnly?: boolean;
@@ -2113,6 +2259,11 @@ function DetailSide({
   loadingReplyIds?: ReadonlySet<string>;
   onImageOpen: OpenImageLightbox;
   onImageContextMenu: ImageContextMenuHandler;
+  recommendations?: FeedPost[];
+  recommendationsLoading?: boolean;
+  recommendationsError?: string;
+  onOpenRecommendation?: (post: FeedPost) => void;
+  onOpenTopic?: (post: FeedPost) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   return (
@@ -2123,6 +2274,7 @@ function DetailSide({
       <div ref={scrollRef} className="post-detail__scroller">
         {!commentsOnly && (
           <article className="post-detail__content">
+            <PostTopicBadge post={detail.post} className="post-topic-badge--detail" onOpen={onOpenTopic} />
             <h1><HeyboxText value={detail.post.title} emojiSize={24} preserveLineBreaks={false} /></h1>
             <ContentBlocks blocks={detail.blocks} fallback={detail.post.excerpt} title={detail.post.title} onImageOpen={onImageOpen} onImageContextMenu={onImageContextMenu} />
             <PostContentTags tags={detail.post.contentTags} />
@@ -2181,6 +2333,156 @@ function ArticlePane({ detail, titleId, onImageOpen, onImageContextMenu }: {
   );
 }
 
+function OriginalPostReader({
+  detail,
+  titleId,
+  onClose,
+  onToggleFollow,
+  followLoading,
+  onTogglePostLike,
+  onTogglePostFavorite,
+  postActionLoading,
+  favoriteFolders,
+  favoritePickerOpen,
+  onSelectFavoriteFolder,
+  onCloseFavoritePicker,
+  onToggleCommentLike,
+  likingCommentIds,
+  onLoadMoreComments,
+  loadingMoreComments,
+  onLoadMoreReplies,
+  loadingReplyIds,
+  onImageOpen,
+  onImageContextMenu,
+  recommendations,
+  recommendationsLoading,
+  recommendationsError,
+  onOpenRecommendation,
+  onOpenTopic
+}: {
+  detail: PostDetail;
+  titleId: string;
+  onClose: () => void;
+  onToggleFollow?: () => void;
+  followLoading?: boolean;
+  onTogglePostLike?: () => void;
+  onTogglePostFavorite?: () => void;
+  postActionLoading?: "like" | "favorite";
+  favoriteFolders?: FavoriteFolder[];
+  favoritePickerOpen?: boolean;
+  onSelectFavoriteFolder?: (folderId: string) => void;
+  onCloseFavoritePicker?: () => void;
+  onToggleCommentLike?: (commentId: string) => void;
+  likingCommentIds?: ReadonlySet<string>;
+  onLoadMoreComments?: () => void;
+  loadingMoreComments?: boolean;
+  onLoadMoreReplies?: (rootCommentId: string) => void;
+  loadingReplyIds?: ReadonlySet<string>;
+  onImageOpen: OpenImageLightbox;
+  onImageContextMenu: ImageContextMenuHandler;
+  recommendations?: FeedPost[];
+  recommendationsLoading?: boolean;
+  recommendationsError?: string;
+  onOpenRecommendation?: (post: FeedPost) => void;
+  onOpenTopic?: (post: FeedPost) => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const imageScheduler = useMemo(() => createArticleImageScheduler(), [detail.post.id]);
+  const postUrl = detail.shareUrl || detail.post.href;
+  const meta = [detail.post.createdAt, detail.post.ipLocation ? `IP ${detail.post.ipLocation}` : ""]
+    .filter(Boolean)
+    .join(" · ");
+  useEffect(() => () => imageScheduler.dispose(), [imageScheduler]);
+
+  return (
+    <div className="article-reader article-reader--original" role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <header className="article-reader__toolbar">
+        <button type="button" onClick={onClose}>
+          <CloseIcon />
+          <span>关闭</span>
+        </button>
+        <strong className="article-reader__brand">HeyNote</strong>
+        <a href={postUrl} target="_blank" rel="noopener noreferrer">
+          <span>原站打开</span>
+          <ExternalIcon />
+        </a>
+      </header>
+
+      <div ref={scrollRef} className="article-reader__scroll">
+        <div className="article-reader__layout">
+          <div className="article-reader__main">
+        <article className="article-reader__article">
+          <header className="article-reader__heading">
+            <PostTopicBadge post={detail.post} className="article-reader__topic" onOpen={onOpenTopic} />
+            <h1 id={titleId}><HeyboxText value={detail.post.title} emojiSize={24} preserveLineBreaks={false} /></h1>
+            <PostByline post={detail.post} onToggleFollow={onToggleFollow} followLoading={followLoading} />
+            {meta && <p className="article-reader__meta">{meta}</p>}
+            <PostContentTags tags={detail.post.contentTags} />
+          </header>
+
+          <div className="article-reader__body">
+            <ContentBlocks
+              blocks={detail.blocks}
+              fallback={detail.post.excerpt}
+              article
+              title={detail.post.title}
+              onImageOpen={onImageOpen}
+              onImageContextMenu={onImageContextMenu}
+              progressiveImageRoot={scrollRef}
+              progressiveImageScheduler={imageScheduler}
+            />
+          </div>
+
+          <div className="article-reader__stats" aria-label="帖子数据">
+            <span><ThumbUpIcon />{formatCount(detail.post.likes)}</span>
+            <span><StarIcon />{formatCount(detail.post.favorites ?? 0)}</span>
+            <span><CommentIcon />{formatCount(detail.post.comments)}</span>
+          </div>
+
+          <div className="article-reader__actions">
+            <InteractionBar
+              detail={detail}
+              onTogglePostLike={onTogglePostLike}
+              onTogglePostFavorite={onTogglePostFavorite}
+              postActionLoading={postActionLoading}
+              favoriteFolders={favoriteFolders}
+              favoritePickerOpen={favoritePickerOpen}
+              onSelectFavoriteFolder={onSelectFavoriteFolder}
+              onCloseFavoritePicker={onCloseFavoritePicker}
+            />
+          </div>
+        </article>
+
+        <section className="article-reader__comments" aria-label="帖子评论">
+          <CommentsSection
+            comments={detail.comments}
+            total={detail.post.comments}
+            hasMore={detail.hasMoreComments}
+            loadingMore={loadingMoreComments}
+            onLoadMore={onLoadMoreComments}
+            onLoadMoreReplies={onLoadMoreReplies}
+            loadingReplyIds={loadingReplyIds}
+            onToggleCommentLike={onToggleCommentLike}
+            likingCommentIds={likingCommentIds}
+            scrollRoot={scrollRef}
+            onImageOpen={onImageOpen}
+          />
+        </section>
+          </div>
+          <DetailRecommendationRail
+            detail={detail}
+            recommendations={recommendations}
+            loading={recommendationsLoading}
+            error={recommendationsError}
+            onOpenRecommendation={onOpenRecommendation}
+            onOpenTopic={onOpenTopic}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function PostDetailModal({
   detail,
   onClose,
@@ -2200,7 +2502,12 @@ export function PostDetailModal({
   onLoadMoreReplies,
   loadingReplyIds,
   onImageOpen,
-  onImageContextMenu
+  onImageContextMenu,
+  recommendations,
+  recommendationsLoading,
+  recommendationsError,
+  onOpenRecommendation,
+  onOpenTopic
 }: {
   detail: PostDetail;
   onClose: () => void;
@@ -2221,6 +2528,11 @@ export function PostDetailModal({
   loadingReplyIds?: ReadonlySet<string>;
   onImageOpen: OpenImageLightbox;
   onImageContextMenu: ImageContextMenuHandler;
+  recommendations?: FeedPost[];
+  recommendationsLoading?: boolean;
+  recommendationsError?: string;
+  onOpenRecommendation?: (post: FeedPost) => void;
+  onOpenTopic?: (post: FeedPost) => void;
 }) {
   const titleId = useId();
   const video = detail.media.find((media): media is VideoMedia => media.kind === "video");
@@ -2244,6 +2556,38 @@ export function PostDetailModal({
     "--detail-side-width": `${adaptiveLayout.sideWidth}px`
   } : undefined, [adaptiveLayout]);
 
+  if (!showsVideo) {
+    return (
+      <OriginalPostReader
+        detail={detail}
+        titleId={titleId}
+        onClose={onClose}
+        onToggleFollow={onToggleFollow}
+        followLoading={followLoading}
+        onTogglePostLike={onTogglePostLike}
+        onTogglePostFavorite={onTogglePostFavorite}
+        postActionLoading={postActionLoading}
+        favoriteFolders={favoriteFolders}
+        favoritePickerOpen={favoritePickerOpen}
+        onSelectFavoriteFolder={onSelectFavoriteFolder}
+        onCloseFavoritePicker={onCloseFavoritePicker}
+        onToggleCommentLike={onToggleCommentLike}
+        likingCommentIds={likingCommentIds}
+        onLoadMoreComments={onLoadMoreComments}
+        loadingMoreComments={loadingMoreComments}
+        onLoadMoreReplies={onLoadMoreReplies}
+        loadingReplyIds={loadingReplyIds}
+        onImageOpen={onImageOpen}
+        onImageContextMenu={onImageContextMenu}
+        recommendations={recommendations}
+        recommendationsLoading={recommendationsLoading}
+        recommendationsError={recommendationsError}
+        onOpenRecommendation={onOpenRecommendation}
+        onOpenTopic={onOpenTopic}
+      />
+    );
+  }
+
   return (
     <div className={`detail-mask ${showsImage ? "detail-mask--image" : ""}`.trim()} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section
@@ -2266,6 +2610,7 @@ export function PostDetailModal({
                 images={images}
                 title={detail.post.title}
                 topic={detail.post.topic}
+                topicIcon={detail.post.topicIcon}
                 onImageOpen={onImageOpen}
                 onImageContextMenu={onImageContextMenu}
                 onFirstImageDimensions={(image, width, height) => {
@@ -2298,6 +2643,11 @@ export function PostDetailModal({
           loadingReplyIds={loadingReplyIds}
           onImageOpen={onImageOpen}
           onImageContextMenu={onImageContextMenu}
+          recommendations={recommendations}
+          recommendationsLoading={recommendationsLoading}
+          recommendationsError={recommendationsError}
+          onOpenRecommendation={onOpenRecommendation}
+          onOpenTopic={onOpenTopic}
         />
       </section>
     </div>
@@ -2324,7 +2674,12 @@ export function DetailViews({
   loadingMoreComments = false,
   onLoadMoreReplies,
   loadingReplyIds,
-  onImageContextMenu
+  onImageContextMenu,
+  recommendations,
+  recommendationsLoading,
+  recommendationsError,
+  onOpenRecommendation,
+  onOpenTopic
 }: DetailViewsProps) {
   const layerRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
@@ -2440,6 +2795,11 @@ export function DetailViews({
         loadingReplyIds={loadingReplyIds}
         onImageOpen={openImageLightbox}
         onImageContextMenu={onImageContextMenu}
+        recommendations={recommendations}
+        recommendationsLoading={recommendationsLoading}
+        recommendationsError={recommendationsError}
+        onOpenRecommendation={onOpenRecommendation}
+        onOpenTopic={onOpenTopic}
       />
       {lightbox && (
         <ImageLightbox

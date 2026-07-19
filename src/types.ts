@@ -3,6 +3,7 @@ export type PostKind = "image" | "video" | "article";
 export interface Community {
   id: string;
   name: string;
+  iconUrl?: string;
 }
 
 export interface FavoriteFolder {
@@ -60,6 +61,7 @@ export interface FeedPost {
   level?: string;
   isFollowing?: boolean;
   topic: string;
+  topicId?: string;
   topicIcon?: string;
   contentTags?: PostContentTag[];
   media: PostMedia[];
@@ -149,6 +151,7 @@ export type HeyboxApiOperation =
   | "feed"
   | "feedBanner"
   | "communityFeed"
+  | "searchSuggestion"
   | "detail"
   | "comments"
   | "commentReplies"
@@ -175,6 +178,11 @@ export type HeyboxApiRequest =
       channel: "xiaoheishu-api";
       operation: "communityFeed";
       params: { topicId: string; offset: number; width: number; lastValue: string };
+    }
+  | {
+      channel: "xiaoheishu-api";
+      operation: "searchSuggestion";
+      params: { keyword: string };
     }
   | {
       channel: "xiaoheishu-api";

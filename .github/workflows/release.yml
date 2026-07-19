@@ -48,6 +48,9 @@ jobs:
       - name: Build extension
         run: npm run build
 
+      - name: Verify extension output
+        run: npm run verify:dist
+
       - name: Package extension
         working-directory: dist
         run: zip -r ../extension.zip . -x '*.DS_Store'

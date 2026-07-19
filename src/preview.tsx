@@ -23,6 +23,15 @@ function image(url: string, width = 720, height = 960): PostMedia {
   return { kind: "image", url, width, height };
 }
 
+function communityIcon(background: string, accent: string, text: string): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
+    <rect width="96" height="96" rx="28" fill="${background}"/>
+    <circle cx="68" cy="25" r="20" fill="${accent}" opacity=".82"/>
+    <text x="48" y="58" text-anchor="middle" fill="#171817" font-size="26" font-weight="800" font-family="sans-serif">${text}</text>
+  </svg>`;
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
 const covers = {
   setup: poster("#d7edff", "#ff5e68", "SETUP"),
   video: poster("#dfe8d0", "#ffcc55", "VIDEO"),
@@ -35,21 +44,32 @@ const covers = {
 };
 
 export const demoCommunities: Community[] = [
-  { id: "1", name: "PC游戏" },
-  { id: "569", name: "VRChat" },
-  { id: "2", name: "盒友杂谈" },
-  { id: "3", name: "方舟：生存进化" },
-  { id: "4", name: "艾尔登法环" },
-  { id: "5", name: "Steam" },
-  { id: "6", name: "星露谷物语" },
-  { id: "7", name: "求生之路2" },
-  { id: "8", name: "Gal游戏综合区" },
-  { id: "9", name: "战争雷霆" },
-  { id: "10", name: "绝地求生" },
-  { id: "11", name: "崩坏：星穹铁道" }
+  { id: "1", name: "PC游戏", iconUrl: communityIcon("#d7edff", "#ff5e68", "PC") },
+  { id: "569", name: "VRChat", iconUrl: communityIcon("#d8d3f6", "#6c55d9", "VR") },
+  { id: "2", name: "盒友杂谈", iconUrl: communityIcon("#f4d7cd", "#f25345", "盒") },
+  { id: "3", name: "方舟：生存进化", iconUrl: communityIcon("#dce8d8", "#4f9b6b", "舟") },
+  { id: "4", name: "艾尔登法环", iconUrl: communityIcon("#eadfbe", "#ff654f", "环") },
+  { id: "5", name: "Steam", iconUrl: communityIcon("#cde4db", "#4078bd", "S") },
+  { id: "6", name: "星露谷物语", iconUrl: communityIcon("#dfe8d0", "#ffcc55", "星") },
+  { id: "7", name: "求生之路2", iconUrl: communityIcon("#f5d8e5", "#5b4dc6", "路") },
+  { id: "8", name: "Gal游戏综合区", iconUrl: communityIcon("#f2d6b6", "#e04d3e", "G") },
+  { id: "9", name: "战争雷霆", iconUrl: communityIcon("#d6e3e8", "#4078bd", "雷") },
+  { id: "10", name: "绝地求生", iconUrl: communityIcon("#e4d9eb", "#825ab6", "吃") },
+  { id: "11", name: "崩坏：星穹铁道", iconUrl: communityIcon("#e7e0d4", "#e96552", "星") }
 ];
 
-export const demoPosts: FeedPost[] = [
+const demoTopicIcons = new Map(demoCommunities.map((community) => [community.name, community.iconUrl]));
+
+function withDemoTopicIcons(posts: FeedPost[]): FeedPost[] {
+  return posts.map((post) => ({
+    ...post,
+    topicIcon: post.topicIcon
+      || demoTopicIcons.get(post.topic)
+      || communityIcon("#eef0f3", "#ff5e68", post.topic.slice(0, 1) || "盒")
+  }));
+}
+
+export const demoPosts: FeedPost[] = withDemoTopicIcons([
   { id: "1", href: "#", title: "终于把桌面改成了理想工作站 [cube_喜欢]", excerpt: "光线、收纳和显示器支架都重新排了一遍。[heygirl_敲开心]", author: "夜航员", authorId: "demo-author-1", level: "Lv.14", isFollowing: false, topic: "数码硬件", contentTags: [{ name: "电脑求助", tagId: 16043, styleType: 2, backgroundColor: "#004b961a", textColor: "#004b96", iconUrl: "https://imgheybox.max-c.com/oa/2024/07/30/912b6ed8dba7f938a45fe00bddc0d697.png" }], media: [image(covers.setup), image(covers.smoke), image(covers.screenshot)], kind: "image", hasVideo: false, linkTag: 27, likes: 283, comments: 46 },
   { id: "2", href: "#", title: "二十平小家，把每一寸收纳都用起来", excerpt: "从测量到安装的完整过程。", author: "邻居小小A", topic: "生活分享", media: [{ kind: "video", url: "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4", poster: covers.video, width: 720, height: 960, duration: 30, durationLabel: "00:30" }], kind: "video", hasVideo: true, linkTag: 1, likes: 581, comments: 24 },
   { id: "3", href: "#", title: "十年后重玩《巫师 3》，我才读懂这段支线", excerpt: "当年只顾着赶路，现在却在一个无名村庄停了很久。", author: "白果酒", topic: "PC 游戏", contentTags: [{ name: "Steam", align: "top", styleType: 1, backgroundColor: "#f3f4f5", textColor: "#14191e", iconUrl: covers.story }, { name: "剧情讨论", align: "bottom", styleType: 2, backgroundColor: "#004b961a", textColor: "#004b96" }], media: [image(covers.story, 1200, 760)], kind: "article", hasVideo: false, linkTag: 1, likes: 3401, comments: 307 },
@@ -60,7 +80,7 @@ export const demoPosts: FeedPost[] = [
   { id: "8", href: "#", title: "把旧掌机修好以后，我爸先玩了一下午", excerpt: "一次普通维修，最后翻出了很多小时候的故事。", author: "螺丝刀少年", topic: "数码硬件", media: [image(covers.retro)], kind: "article", hasVideo: false, linkTag: 1, likes: 1104, comments: 203 },
   { id: "9", href: "#", title: "本周最离谱的游戏截图大赏", excerpt: "最后一张尤其重量级。", author: "截图键失灵", topic: "沙雕日常", media: [image(covers.screenshot)], kind: "image", hasVideo: false, linkTag: 27, likes: 458, comments: 77 },
   { id: "10", href: "#", title: "给第一次装机的人：别被参数表吓到", excerpt: "把预算和需求说清楚，选择会简单很多。", author: "硬件门诊", topic: "数码硬件", media: [image(covers.build)], kind: "article", hasVideo: false, linkTag: 1, likes: 667, comments: 89 }
-];
+]);
 
 const comments: CommentItem[] = [
   {
