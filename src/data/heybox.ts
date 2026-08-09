@@ -713,6 +713,12 @@ function mapCommentGroups(value: unknown, fallbackPrefix = "p1"): CommentItem[] 
 
 function resultRecord(payload: unknown): UnknownRecord {
   const root = asRecord(payload);
+  if (root.status === "show_captcha") {
+    throw new Error("小黑盒要求完成安全验证，请先在原版页面完成验证后重试");
+  }
+  if (root.status === "login" || root.status === "relogin" || root.status === "lack_token") {
+    throw new Error("小黑盒登录状态已失效，请先登录后重试");
+  }
   if (root.status !== "ok") throw new Error(asText(root.msg) || "小黑盒接口暂时不可用");
   return asRecord(root.result);
 }

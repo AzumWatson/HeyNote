@@ -734,9 +734,34 @@ function pageFetchHeyboxApi(
       }
     }
 
-    try {
-      const requestParams = { ...inputParams };
-      if (path === "/bbs/app/link/favour") requestParams.userid = cookieValue("heybox_id");
+    function accountIdFromCookies(): string | undefined {
+      for (const name of ["heybox_id", "user_heybox_id"]) {
+        const value = cookieValue(name);
+        if (value !== "-1") return value;
+      }
+      return undefined;
+    }
+
+    function recordValue(value: unknown): Record<string, unknown> {
+      return value && typeof value === "object" && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+    }
+
+    function textValue(...values: unknown[]): string | undefined {
+      for (const value of values) {
+        if (typeof value === "string" && value.trim()) return value.trim();
+        if (typeof value === "number" && Number.isFinite(value)) return String(value);
+      }
+      return undefined;
+    }
+
+    async function requestJson(
+      requestPath: string,
+      input: Record<string, JsonScalar>,
+      requestMethod: "GET" | "POST",
+      requestOrigin = apiOrigin
+    ): Promise<{ response: Response; data?: unknown; parseError?: boolean }> {
       const timestamp = Math.floor(Date.now() / 1000);
       const random = new Uint8Array(16);
       crypto.getRandomValues(random);
@@ -747,9 +772,9 @@ function pageFetchHeyboxApi(
         ? "Windows"
         : "Mac";
 
-      const url = new URL(path, `${apiOrigin}/`);
-      if (method === "GET") {
-        Object.entries(requestParams).forEach(([key, value]) => {
+      const url = new URL(requestPath, `${requestOrigin}/`);
+      if (requestMethod === "GET") {
+        Object.entries(input).forEach(([key, value]) => {
           url.searchParams.set(key, value === null ? "" : String(value));
         });
       }
@@ -761,26 +786,28 @@ function pageFetchHeyboxApi(
       url.searchParams.set("x_client_version", "");
       url.searchParams.set("client_type", "web");
       url.searchParams.set("web_version", "3.0");
-      url.searchParams.set("heybox_id", cookieValue("heybox_id"));
+      // The official web request does not append heybox_id to every endpoint.
+      // Cookies are sent by credentials: include; adding the unreadable-cookie
+      // fallback "-1" here makes the API return show_captcha.
       url.searchParams.set("version", "999.0.4");
       url.searchParams.set("_time", String(timestamp));
       url.searchParams.set("nonce", nonce);
-      url.searchParams.set("hkey", Tr(path, timestamp + 1, nonce));
+      url.searchParams.set("hkey", Tr(requestPath, timestamp + 1, nonce));
 
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 15_000);
       let response: Response;
       try {
-        const requestBody = method === "POST"
-          ? new URLSearchParams(Object.entries(requestParams).map(([key, value]) => [
+        const requestBody = requestMethod === "POST"
+          ? new URLSearchParams(Object.entries(input).map(([key, value]) => [
               key,
               value === null ? "" : String(value)
             ]))
           : undefined;
         response = await fetch(url.toString(), {
-          method,
+          method: requestMethod,
           credentials: "include",
-          headers: method === "POST"
+          headers: requestMethod === "POST"
             ? {
                 Accept: "application/json",
                 "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"
@@ -794,30 +821,64 @@ function pageFetchHeyboxApi(
       }
 
       const text = await response.text();
-      let data: unknown;
       try {
-        data = JSON.parse(text);
+        return { response, data: JSON.parse(text) };
       } catch {
+        return { response, parseError: true };
+      }
+    }
+
+    try {
+      const requestParams = { ...inputParams };
+      let accountId = accountIdFromCookies();
+
+      // Mutations need an authenticated account. If the readable cookie is not
+      // available yet, mirror the official site's restore_login bootstrap once
+      // before constructing the mutation payload.
+      if (method === "POST" && !accountId) {
+        const restored = await requestJson(
+          "/account/restore_login",
+          {},
+          "GET",
+          "https://api.xiaoheihe.cn"
+        );
+        const restoredRecord = recordValue(restored.data);
+        const restoredResult = recordValue(restoredRecord.result);
+        const restoredProfile = recordValue(restoredResult.profile);
+        const restoredAccount = recordValue(restoredResult.account_detail);
+        accountId = textValue(restoredProfile.heybox_id, restoredAccount.userid);
+        if (restoredRecord.status === "show_captcha") {
+          return { ok: false, error: "小黑盒要求完成安全验证，请先在原版页面完成验证后重试" };
+        }
+      }
+
+      if (path === "/bbs/app/link/favour") {
+        if (!accountId) return { ok: false, error: "小黑盒登录状态未恢复，请先登录后重试" };
+        requestParams.userid = accountId;
+      }
+
+      const result = await requestJson(path, requestParams, method);
+      if (result.parseError) {
         return {
           ok: false,
-          error: response.ok
+          error: result.response.ok
             ? "小黑盒 API 返回了无法解析的非 JSON 数据"
-            : `小黑盒 API 返回 HTTP ${response.status}`
+            : `小黑盒 API 返回 HTTP ${result.response.status}`
         };
       }
 
-      if (!response.ok) {
-        const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
+      if (!result.response.ok) {
+        const record = recordValue(result.data);
         const detail = typeof record.msg === "string"
           ? record.msg
           : typeof record.message === "string" ? record.message : "";
         return {
           ok: false,
-          error: `小黑盒 API 返回 HTTP ${response.status}${detail ? `：${detail}` : ""}`
+          error: `小黑盒 API 返回 HTTP ${result.response.status}${detail ? `：${detail}` : ""}`
         };
       }
 
-      return { ok: true, data };
+      return { ok: true, data: result.data };
     } catch (error) {
       return {
         ok: false,

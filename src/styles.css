@@ -57,6 +57,7 @@ input:focus-visible {
   --surface-active: #f0f0ed;
   --field: #f3f3f1;
   --field-focus: #fff;
+  --media-surface: #f1f1ef;
   --soft: var(--surface-soft);
   --paper: var(--surface);
   --line: rgba(23, 23, 23, .09);
@@ -93,6 +94,7 @@ input:focus-visible {
   --surface-active: #30312e;
   --field: #242522;
   --field-focus: #292a27;
+  --media-surface: #1a1b19;
   --line: rgba(255, 255, 255, .09);
   --line-strong: rgba(255, 255, 255, .17);
   --scrollbar: rgba(255, 255, 255, .2);
@@ -1293,7 +1295,7 @@ input:focus-visible {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: #090909;
+  background: var(--media-surface);
 }
 
 .post-detail__side {
@@ -1743,7 +1745,7 @@ button.detail-interactions__metric {
   display: grid;
   place-items: center;
   overflow: hidden;
-  background: #090909;
+  background: var(--media-surface);
   touch-action: pan-y;
   user-select: none;
 }
