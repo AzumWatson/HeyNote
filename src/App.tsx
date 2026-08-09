@@ -2879,7 +2879,8 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     }
   }
 
-  const isOwnProfile = view === "profile"
+  const isOwnProfile = !searchQuery
+    && view === "profile"
     && Boolean(profileUser && currentUser && profileUser.id === currentUser.id);
   const activeProfileId = parseUserProfileRoute() ?? profileUser?.id ?? currentUser?.id ?? "";
 

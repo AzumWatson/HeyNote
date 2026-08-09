@@ -6,7 +6,7 @@
 
 ![Chrome 102+](https://img.shields.io/badge/Chrome-102%2B-4285F4?style=flat-square&logo=googlechrome&logoColor=white)
 ![Manifest V3](https://img.shields.io/badge/Manifest-V3-ff3653?style=flat-square)
-![Version 0.8.0](https://img.shields.io/badge/version-0.8.0-6f42c1?style=flat-square)
+![Version 0.8.1](https://img.shields.io/badge/version-0.8.1-6f42c1?style=flat-square)
 ![React 19](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=111)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white)
 
@@ -16,7 +16,7 @@ HeyNote 的界面与交互设计灵感来自小红书网页版，并根据我个
 
 稳定版本会由 GitHub Actions 自动构建并发布到 [Releases](../../releases)。
 
-当前版本：`0.8.0`
+当前版本：`0.8.1`
 
 > [!IMPORTANT]
 > HeyNote 的重点是重新组织页面与阅读体验。
