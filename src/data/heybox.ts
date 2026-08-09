@@ -15,6 +15,14 @@ import type {
   PostContentTag,
   PostKind,
   PostMedia,
+  SearchFilterOption,
+  SearchFilterSelection,
+  SearchFilters,
+  SearchMedal,
+  SearchResult,
+  SearchSuggestion,
+  SearchType,
+  SearchUser,
   VideoMedia
 } from "../types";
 import { heyboxEmojiFromCode, heyboxEmojiFromId } from "./heybox-emoji";
@@ -723,6 +731,29 @@ function resultRecord(payload: unknown): UnknownRecord {
   return asRecord(root.result);
 }
 
+// Search endpoints have returned both {status:"ok", result:...} and
+// {msg:"", result:...} across web versions. Treat an omitted status as success,
+// while preserving the same login/captcha protections as the other endpoints.
+function searchApiResultRecord(payload: unknown): UnknownRecord {
+  const root = asRecord(payload);
+  if (root.status === "show_captcha") {
+    throw new Error("小黑盒要求完成安全验证，请先在原版页面完成验证后重试");
+  }
+  if (root.status === "login" || root.status === "relogin" || root.status === "lack_token") {
+    throw new Error("小黑盒登录状态已失效，请先登录后重试");
+  }
+  if (root.status !== undefined && root.status !== "ok") {
+    throw new Error(asText(root.msg) || "小黑盒搜索接口暂时不可用");
+  }
+  return asRecord(root.result);
+}
+
+function searchResultRecord(payload: unknown): UnknownRecord {
+  const result = searchApiResultRecord(payload);
+  if (!Object.keys(result).length) throw new Error("小黑盒搜索接口返回为空");
+  return result;
+}
+
 async function callBackground(request: HeyboxApiRequest): Promise<unknown> {
   if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
     throw new Error("本地视觉样稿不会请求小黑盒；请安装扩展并从小黑盒页面打开");
@@ -886,6 +917,314 @@ export async function fetchFeedPage(
   };
 }
 
+function searchTypeValue(value: unknown): SearchType | undefined {
+  return value === "general" || value === "user" ? value : undefined;
+}
+
+function mapSearchMedal(value: unknown): SearchMedal | null {
+  const item = asRecord(value);
+  const name = asText(item.name, item.medal_name);
+  if (!name) return null;
+  const id = optionalNumber(item.id, item.medal_id);
+  return {
+    ...(id === undefined ? {} : { id }),
+    name,
+    imageUrl: remoteUrl(item.img_url) || remoteUrl(item.image_url) || remoteUrl(item.icon),
+    achieved: hasFieldValue(item.achieved) ? isEnabledFlag(item.achieved) : undefined,
+    worn: hasFieldValue(item.wear) ? isEnabledFlag(item.wear) : undefined,
+    description: asText(item.description) || undefined
+  };
+}
+
+function mapSearchUser(value: unknown): SearchUser | null {
+  const info = asRecord(value);
+  const nestedUser = asRecord(info.user ?? info.user_info);
+  const id = asText(info.userid, info.user_id, info.id, nestedUser.userid, nestedUser.user_id, nestedUser.id);
+  const username = asText(info.username, info.nickname, info.name, nestedUser.username, nestedUser.nickname, nestedUser.name);
+  if (!id || !username) return null;
+  const level = levelFrom(info, {}) || levelFrom(nestedUser, info);
+  const rawMedals = firstNonEmptyArray(info.medals, info.medal, nestedUser.medals, nestedUser.medal);
+  const medals = rawMedals
+    .map(mapSearchMedal)
+    .filter((medal): medal is SearchMedal => Boolean(medal));
+  const followingValue = hasFieldValue(info.is_follow)
+    ? info.is_follow
+    : hasFieldValue(info.follow_status) ? info.follow_status : nestedUser.is_follow ?? nestedUser.follow_status;
+  return {
+    id,
+    username,
+    avatar: remoteUrl(info.avatar) || remoteUrl(info.avartar) || remoteUrl(nestedUser.avatar) || remoteUrl(nestedUser.avartar),
+    level: level || undefined,
+    recTag: asText(info.rec_tag, nestedUser.rec_tag) || undefined,
+    isFollowing: hasFieldValue(followingValue) ? isEnabledFlag(followingValue) : undefined,
+    medals
+  };
+}
+
+function searchItems(result: UnknownRecord): UnknownRecord[] {
+  const items = Array.isArray(result.items)
+    ? result.items
+    : asRecord(result.items).list ?? asRecord(result.items).items;
+  return asArray(items).map(asRecord).filter((item) => Object.keys(item).length > 0);
+}
+
+function searchList(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  const item = asRecord(value);
+  const nested = item.list ?? item.items ?? item.data;
+  if (Array.isArray(nested)) return nested;
+  if (asText(item.name, item.title, item.label, item.text, item.keyword, item.word)) return [value];
+  return [];
+}
+
+function mapSearchFilterOption(value: unknown, group: string, index: number): SearchFilterOption | null {
+  const item = asRecord(value);
+  const name = asText(item.name, item.title, item.label, item.text, item.desc, value);
+  if (!name) return null;
+  const explicitKey = typeof item.key === "string"
+    ? item.key
+    : typeof item.key === "number" && Number.isFinite(item.key) ? String(item.key) : undefined;
+  const optionValue = explicitKey ?? (asText(
+    item.value,
+    item.filter_value,
+    item.sort_value,
+    item.time_range,
+    item.id,
+    item.report_id,
+    item.code
+  ) || (typeof value === "string" ? value : name));
+  return {
+    id: `${group}-${optionValue || name}-${index}`,
+    name,
+    value: optionValue,
+    selected: hasFieldValue(item.selected)
+      ? isEnabledFlag(item.selected)
+      : hasFieldValue(item.is_selected)
+        ? isEnabledFlag(item.is_selected)
+        : hasFieldValue(item.is_select)
+          ? isEnabledFlag(item.is_select)
+          : hasFieldValue(item.checked) ? isEnabledFlag(item.checked) : undefined
+  };
+}
+
+function searchFilterNestedItems(value: unknown): unknown[] {
+  const item = asRecord(value);
+  return firstNonEmptyArray(
+    searchList(item.filters),
+    searchList(item.options),
+    searchList(item.items),
+    searchList(item.list),
+    searchList(item.data)
+  );
+}
+
+function searchFilterGroupKey(value: unknown): string {
+  const item = asRecord(value);
+  return asText(item.key, item.type, item.name, item.desc)
+    .toLocaleLowerCase("en-US")
+    .replaceAll("-", "_")
+    .replaceAll(" ", "_");
+}
+
+function searchFilterGroupValues(source: unknown, keys: Set<string>): unknown[] {
+  return searchList(source).flatMap((value) => {
+    const nested = searchFilterNestedItems(value);
+    return nested.length && keys.has(searchFilterGroupKey(value)) ? nested : [];
+  });
+}
+
+function searchFilterOptionValues(source: unknown, excludedGroups = new Set<string>()): unknown[] {
+  return searchList(source).flatMap((value) => {
+    const nested = searchFilterNestedItems(value);
+    if (!nested.length) return [value];
+    return excludedGroups.has(searchFilterGroupKey(value)) ? [] : nested;
+  });
+}
+
+function mapSearchFilters(result: UnknownRecord): SearchFilters {
+  const nestedFilters = asRecord(result.filters ?? result.filter);
+  const rawFilterGroups = [
+    ...searchList(result.filter_list),
+    ...searchList(nestedFilters.filter_list)
+  ];
+  const sortGroupKeys = new Set(["sort_filter", "sort_type", "sort"]);
+  const timeGroupKeys = new Set(["time_range", "time"]);
+  const filterOptionValues = searchFilterOptionValues(
+    rawFilterGroups,
+    new Set([...sortGroupKeys, ...timeGroupKeys])
+  );
+  const sortOptionValues = [
+    ...searchFilterGroupValues(rawFilterGroups, sortGroupKeys),
+    ...searchFilterOptionValues(result.sort_filter_list),
+    ...searchFilterOptionValues(nestedFilters.sort_filter_list)
+  ];
+  const timeOptionValues = [
+    ...searchFilterGroupValues(rawFilterGroups, timeGroupKeys),
+    ...searchFilterOptionValues(result.time_range_list),
+    ...searchFilterOptionValues(nestedFilters.time_range_list)
+  ];
+  const mapOptions = (values: unknown[], group: string): SearchFilterOption[] => values
+    .map((value, index) => mapSearchFilterOption(value, group, index))
+    .filter((value): value is SearchFilterOption => Boolean(value))
+    .filter((value, index, options) => options.findIndex((item) => item.value === value.value) === index);
+  const filterList = mapOptions(filterOptionValues, "filter");
+  const sortFilterList = mapOptions(sortOptionValues, "sort");
+  const timeRangeList = mapOptions(timeOptionValues, "time");
+  return { filterList, sortFilterList, timeRangeList };
+}
+
+function mapSearchSuggestion(value: unknown, index: number): SearchSuggestion | null {
+  const item = asRecord(value);
+  const text = asText(item.name, item.text, item.keyword, item.word, item.title, value);
+  if (!text) return null;
+  return {
+    id: asText(item.id, item.keyword_id, item.word_id) || `${text}-${index}`,
+    text,
+    iconUrl: remoteUrl(item.icon_url) || remoteUrl(item.icon) || remoteUrl(item.image_url),
+    kind: asText(item.type, item.kind, item.category) || undefined
+  };
+}
+
+function searchSuggestionsFrom(result: UnknownRecord): SearchSuggestion[] {
+  const nested = asRecord(result.suggestion ?? result.suggestions ?? result.search_suggestion);
+  const welcomeItems = asArray(result.Lists ?? result.lists).flatMap((value) => (
+    searchList(asRecord(value).items)
+  ));
+  return firstNonEmptyArray(
+    searchList(result.list),
+    searchList(result.items),
+    searchList(result.suggestion),
+    searchList(result.suggestions),
+    searchList(result.search_suggestion),
+    welcomeItems,
+    searchList(nested)
+  )
+    .map((value, index) => mapSearchSuggestion(value, index))
+    .filter((value): value is SearchSuggestion => Boolean(value))
+    .filter((value, index, values) => values.findIndex((item) => item.text === value.text) === index)
+    .slice(0, 12);
+}
+
+function searchFoundNamesFrom(result: UnknownRecord): string[] {
+  const searchFound = asRecord(result.search_found);
+  return searchList(searchFound.list)
+    .map((value) => asText(asRecord(value).name, value))
+    .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
+    .slice(0, 20);
+}
+
+export async function fetchSearchWelcomePage(): Promise<SearchSuggestion[]> {
+  const payload = await callBackground({
+    channel: "xiaoheishu-api",
+    operation: "searchWelcome",
+    params: {}
+  });
+  return searchSuggestionsFrom(searchApiResultRecord(payload));
+}
+
+export async function fetchSearchFound(): Promise<string[]> {
+  const payload = await callBackground({
+    channel: "xiaoheishu-api",
+    operation: "searchFound",
+    params: {}
+  });
+  return searchFoundNamesFrom(searchApiResultRecord(payload));
+}
+
+export async function fetchSearchSuggestions(query: string): Promise<SearchSuggestion[]> {
+  const payload = await callBackground({
+    channel: "xiaoheishu-api",
+    operation: "searchSuggestion",
+    params: { query: query.trim() }
+  });
+  return searchSuggestionsFrom(searchApiResultRecord(payload));
+}
+
+/** Fetch one official search page. Only type=link content and type=user users are exposed. */
+export async function fetchSearchPage(
+  query: string,
+  searchType: SearchType,
+  offset = 0,
+  width = 720,
+  selection: SearchFilterSelection = { filter: "", sort: "", timeRange: "" }
+): Promise<SearchResult> {
+  const safeQuery = query.trim();
+  const safeType = searchTypeValue(searchType) ?? "general";
+  const limit = 30;
+  const safeOffset = Math.max(0, Math.round(offset));
+  const payload = await callBackground({
+    channel: "xiaoheishu-api",
+    operation: "search",
+    params: {
+      query: safeQuery,
+      searchType: safeType,
+      offset: safeOffset,
+      limit,
+      width: Math.max(320, Math.round(width)),
+      ...(selection.filter ? { filterTag: selection.filter } : {}),
+      ...(selection.sort ? { sortFilter: selection.sort } : {}),
+      ...(selection.timeRange ? { timeRange: selection.timeRange } : {})
+    }
+  });
+  const result = searchResultRecord(payload);
+  const items = searchItems(result);
+  const posts: FeedPost[] = [];
+  const users: SearchUser[] = [];
+  const seenPosts = new Set<string>();
+  const seenUsers = new Set<string>();
+
+  items.forEach((entry) => {
+    const type = asText(entry.type).toLocaleLowerCase("en-US");
+    const info = [
+      entry.info,
+      entry.data,
+      type === "link" ? entry.link : undefined,
+      type === "user" ? entry.user : undefined,
+      entry
+    ]
+      .map(asRecord)
+      .find((value) => Object.keys(value).length > 0) ?? {};
+    if (safeType === "user" && type === "user") {
+      const user = mapSearchUser(info);
+      if (user && !seenUsers.has(user.id)) {
+        seenUsers.add(user.id);
+        users.push(user);
+      }
+      return;
+    }
+    if (safeType === "general" && type === "link") {
+      const post = mapFeedPost(info);
+      if (!post || seenPosts.has(post.id)) return;
+      seenPosts.add(post.id);
+      posts.push({
+        ...post,
+        title: stripHtml(post.title),
+        excerpt: stripHtml(post.excerpt)
+      });
+    }
+  });
+
+  const explicitHasMore = hasFieldValue(result.has_more)
+    ? isEnabledFlag(result.has_more)
+    : hasFieldValue(result.has_more_page)
+      ? isEnabledFlag(result.has_more_page)
+      : undefined;
+  const realResultCount = safeType === "general" ? posts.length : users.length;
+  // A mixed page can contain spaces, topics and other modules around a small
+  // number of real results. Only an explicit server flag or the absence of
+  // real results can end pagination; raw item count is never used here.
+  const hasMore = realResultCount > 0 && (explicitHasMore === undefined ? true : explicitHasMore);
+  return {
+    query: safeQuery,
+    searchType: safeType,
+    posts,
+    users,
+    filters: mapSearchFilters(result),
+    hasMore,
+    nextOffset: safeOffset + limit
+  };
+}
+
 export async function fetchPostDetail(linkId: string, fallbackPost?: FeedPost): Promise<PostDetail> {
   const payload = await callBackground({
     channel: "xiaoheishu-api",
@@ -975,6 +1314,18 @@ export async function setPostAuthorFollowing(linkId: string, followingId: string
     channel: "xiaoheishu-api",
     operation: following ? "followUser" : "unfollowUser",
     params: { linkId, followingId }
+  });
+  const response = asRecord(payload);
+  if (response.status !== "ok") {
+    throw new Error(asText(response.msg, response.message) || (following ? "关注失败" : "取消关注失败"));
+  }
+}
+
+export async function setSearchUserFollowing(userId: string, following: boolean): Promise<void> {
+  const payload = await callBackground({
+    channel: "xiaoheishu-api",
+    operation: following ? "followSearchUser" : "unfollowSearchUser",
+    params: { userId }
   });
   const response = asRecord(payload);
   if (response.status !== "ok") {

@@ -8,16 +8,21 @@ import {
   type CSSProperties,
   type MouseEvent as ReactMouseEvent
 } from "react";
-import type { CommentItem, Community, FavoriteFolder, FeedPost, FeedResult, ImageMedia, PostDetail, PostKind } from "./types";
+import type { CommentItem, Community, FavoriteFolder, FeedPost, FeedResult, ImageMedia, PostDetail, PostKind, SearchFilterOption, SearchFilterSelection, SearchFilters, SearchResult, SearchSuggestion, SearchType, SearchUser } from "./types";
 import {
   fetchCommentReplies,
   fetchFavoriteFolders,
   fetchFeedCommunities,
   fetchFeedPage,
+  fetchSearchFound,
+  fetchSearchPage,
+  fetchSearchSuggestions,
+  fetchSearchWelcomePage,
   fetchMoreComments,
   fetchPostDetail,
   setCommentLiked,
   setPostAuthorFollowing,
+  setSearchUserFollowing,
   setPostFavorited,
   setPostLiked
 } from "./data/heybox";
@@ -49,6 +54,7 @@ import {
   SearchIcon,
   SunIcon,
   SystemThemeIcon,
+  TrashIcon,
   ThumbUpIcon,
   VideoIcon
 } from "./icons";
@@ -74,11 +80,54 @@ const FEED_STEP = 30;
 const FEED_BUFFER_PAGES = 3;
 const FEED_REVEAL_DURATION_MS = 180;
 const FEED_REVEAL_STAGGER_MS = 15;
+const SEARCH_HISTORY_KEY = "website:bbs-search-history";
+const SEARCH_TYPES: Array<{ value: SearchType; label: string }> = [
+  { value: "general", label: "内容" },
+  { value: "user", label: "用户" }
+];
+const EMPTY_SEARCH_FILTER_SELECTION: SearchFilterSelection = { filter: "", sort: "", timeRange: "" };
 const ORIGINAL_FORUM_URL = "https://www.xiaoheihe.cn/app/bbs/home";
 export const ORIGINAL_MODE_REQUEST_EVENT = "xiaoheishu:request-original-mode";
 
 function isPostKind(value: unknown): value is PostKind {
   return typeof value === "string" && ALL_POST_KINDS.includes(value as PostKind);
+}
+
+function readSearchHistory(value: unknown): string[] {
+  const entries = typeof value === "string"
+    ? [value]
+    : Array.isArray(value)
+    ? value
+    : (() => {
+        const record = value && typeof value === "object" && !Array.isArray(value)
+          ? value as Record<string, unknown>
+          : {};
+        return Array.isArray(record.list)
+          ? record.list
+          : Array.isArray(record.history)
+            ? record.history
+            : Array.isArray(record.data) ? record.data : [];
+      })();
+  return entries
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") {
+        const record = item as Record<string, unknown>;
+        for (const key of ["name", "keyword", "word", "text", "value", "search_word", "search_key"]) {
+          if (typeof record[key] === "string") return record[key] as string;
+        }
+        return "";
+      }
+      return "";
+    })
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item, index, items) => items.indexOf(item) === index)
+    .slice(0, 10);
+}
+
+function searchUserLevel(user: SearchUser): string {
+  return user.level || "";
 }
 
 function requestOriginalMode() {
@@ -513,6 +562,340 @@ function PostCard({ post, coverRatio, eager, revealDelay, likeLoading, onLike, o
   );
 }
 
+function SearchFilterPopover({
+  filters,
+  selection,
+  selectedKinds,
+  showKindFilter,
+  onChange,
+  onToggleKind,
+  onSelectAllKinds
+}: {
+  filters: SearchFilters;
+  selection: SearchFilterSelection;
+  selectedKinds: Set<PostKind>;
+  showKindFilter: boolean;
+  onChange: (selection: SearchFilterSelection) => void;
+  onToggleKind: (kind: PostKind) => void;
+  onSelectAllKinds: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const filterRef = useRef<HTMLDivElement>(null);
+  const groups: Array<{ key: keyof SearchFilterSelection; label: string; options: SearchFilterOption[] }> = [
+    { key: "sort", label: "排序方式", options: filters.sortFilterList },
+    { key: "timeRange", label: "时间范围", options: filters.timeRangeList },
+    { key: "filter", label: "内容筛选", options: filters.filterList }
+  ];
+  const hasServerFilters = groups.some((group) => group.options.length > 0);
+  const hasSortOrTimeFilters = filters.sortFilterList.length > 0 || filters.timeRangeList.length > 0;
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (!filterRef.current || !event.composedPath().includes(filterRef.current)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className="search-filter" ref={filterRef}>
+      <button
+        className="search-filter__trigger"
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <FilterIcon />
+        <span>筛选</span>
+      </button>
+
+      {open && (
+        <div className="search-filter__popover" role="dialog" aria-label="搜索筛选">
+          <div className="search-filter__heading">
+            <div>
+              <strong>筛选内容</strong>
+              <span>{showKindFilter ? "内容类型即时生效，官方筛选会重新请求" : "用户搜索筛选"}</span>
+            </div>
+          </div>
+          {showKindFilter && (
+            <section className="search-filter__group search-filter__group--kinds">
+              <div className="search-filter__group-title">
+                <h3>内容类型</h3>
+                <button type="button" onClick={onSelectAllKinds}>全选</button>
+              </div>
+              <div className="search-filter__kind-options">
+                {KIND_FILTER_OPTIONS.map(({ key, label, icon: Icon }) => {
+                  const selected = selectedKinds.has(key);
+                  return (
+                    <button
+                      className={selected ? "is-active" : ""}
+                      type="button"
+                      key={key}
+                      aria-pressed={selected}
+                      onClick={() => onToggleKind(key)}
+                    >
+                      <Icon />
+                      <span>{label}</span>
+                      <i aria-hidden="true" />
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+          {hasServerFilters && (
+            <div className="search-filter__server-heading">
+              <h3>{hasSortOrTimeFilters ? "排序与时间" : "官方筛选"}</h3>
+              <button type="button" onClick={() => onChange(EMPTY_SEARCH_FILTER_SELECTION)}>重置</button>
+            </div>
+          )}
+          {groups.map((group) => group.options.length > 0 && (
+            <section className="search-filter__group" key={group.key}>
+              <h3>{group.label}</h3>
+              <div className="search-filter__options">
+                {group.options.map((option) => {
+                  const selected = selection[group.key] === option.value
+                    || (!selection[group.key]
+                      && option.selected !== false
+                      && (option.selected === true || option.value === "" || (group.key === "sort" && option.value === "default")));
+                  return (
+                    <button
+                      className={selected ? "is-active" : ""}
+                      type="button"
+                      key={option.id}
+                      aria-pressed={selected}
+                      onClick={() => onChange({ ...selection, [group.key]: option.value })}
+                    >
+                      {option.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+          {!showKindFilter && groups.every((group) => group.options.length === 0) && (
+            <p className="search-filter__empty">用户搜索暂时没有可用的官方筛选项</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SearchUserCard({
+  user,
+  followLoading,
+  reveal,
+  onToggleFollow
+}: {
+  user: SearchUser;
+  followLoading: boolean;
+  reveal: boolean;
+  onToggleFollow: () => void;
+}) {
+  const visibleMedals = user.medals.slice(0, 3);
+  return (
+    <article className={`search-user-card${reveal ? " search-user-card--reveal" : ""}`}>
+      <div className="search-user-card__avatar">
+        {user.avatar ? (
+          <img src={user.avatar} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" />
+        ) : <span>盒</span>}
+      </div>
+      <div className="search-user-card__body">
+        <div className="search-user-card__name-row">
+          <strong>{user.username}</strong>
+          {searchUserLevel(user) && <span className="search-user-card__level">{searchUserLevel(user)}</span>}
+        </div>
+        {user.recTag && <p>{user.recTag}</p>}
+        {visibleMedals.length > 0 && (
+          <div className="search-user-card__medals" aria-label="用户勋章">
+            {visibleMedals.map((medal) => (
+              <span key={`${medal.id ?? medal.name}-${medal.name}`} title={medal.description || medal.name}>
+                {medal.imageUrl ? <img src={medal.imageUrl} alt="" loading="lazy" referrerPolicy="no-referrer" /> : null}
+                {medal.name}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="search-user-card__aside">
+        <span className="search-user-card__id">ID {user.id}</span>
+        <button
+          className={`post-byline__follow${user.isFollowing ? " is-following" : ""}`.trim()}
+          type="button"
+          aria-pressed={Boolean(user.isFollowing)}
+          aria-busy={followLoading}
+          disabled={followLoading}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleFollow();
+          }}
+        >
+          {followLoading
+            ? <span className="post-byline__follow-spinner" aria-hidden="true" />
+            : user.isFollowing
+              ? "已关注"
+              : <><b aria-hidden="true">＋</b>关注</>}
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function SearchResultPanel({
+  result,
+  searchType,
+  loading,
+  error,
+  likeLoadingIds,
+  followLoadingIds,
+  filterSelection,
+  selectedKinds,
+  masonryColumnCount,
+  coverRatios,
+  revealIds,
+  onTypeChange,
+  onFilterChange,
+  onToggleKind,
+  onSelectAllKinds,
+  onToggleUserFollow,
+  onRetry,
+  onLike,
+  onOpen
+}: {
+  result?: SearchResult;
+  searchType: SearchType;
+  loading: boolean;
+  error?: string;
+  likeLoadingIds: Set<string>;
+  followLoadingIds: Set<string>;
+  filterSelection: SearchFilterSelection;
+  selectedKinds: Set<PostKind>;
+  masonryColumnCount: number;
+  coverRatios: Map<string, number>;
+  revealIds: Set<string>;
+  onTypeChange: (type: SearchType) => void;
+  onFilterChange: (selection: SearchFilterSelection) => void;
+  onToggleKind: (kind: PostKind) => void;
+  onSelectAllKinds: () => void;
+  onToggleUserFollow: (user: SearchUser) => void;
+  onRetry: () => void;
+  onLike: (post: FeedPost) => void;
+  onOpen: (post: FeedPost) => void;
+}) {
+  const posts = searchType === "general"
+    ? (result?.posts ?? []).filter((post) => selectedKinds.has(post.kind))
+    : [];
+  const users = result?.users ?? [];
+  const masonryColumns = useMemo(
+    () => distributeFeedPosts(posts, masonryColumnCount, coverRatios),
+    [coverRatios, masonryColumnCount, posts]
+  );
+  const hasItems = searchType === "general" ? posts.length > 0 : users.length > 0;
+  const searchRevealDelay = (post: FeedPost): number | undefined => {
+    if (!revealIds.has("post:" + post.id)) return undefined;
+    const index = posts.indexOf(post);
+    return posts
+      .slice(0, index)
+      .filter((item) => revealIds.has("post:" + item.id))
+      .length * FEED_REVEAL_STAGGER_MS;
+  };
+  return (
+    <section className="search-results" aria-label="搜索结果" aria-busy={loading}>
+      <div className="search-toolbar">
+        <div className="community-list search-type-list" role="tablist" aria-label="搜索范围">
+          {SEARCH_TYPES.map((tab) => (
+            <button
+              key={tab.value}
+              className={searchType === tab.value ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={searchType === tab.value}
+              onClick={() => onTypeChange(tab.value)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        <SearchFilterPopover
+          filters={result?.filters ?? { filterList: [], sortFilterList: [], timeRangeList: [] }}
+          selection={filterSelection}
+          selectedKinds={selectedKinds}
+          showKindFilter={searchType === "general"}
+          onChange={onFilterChange}
+          onToggleKind={onToggleKind}
+          onSelectAllKinds={onSelectAllKinds}
+        />
+      </div>
+
+      {error && (
+        <div className="feed-notice is-error search-results__notice">
+          <div><strong>搜索暂时失败</strong><span>{error}</span></div>
+          <button type="button" onClick={onRetry}>重试</button>
+        </div>
+      )}
+
+      {loading && !result ? (
+        <div className="search-results__loading"><i /><span>正在搜索</span></div>
+      ) : hasItems ? searchType === "general" ? (
+        <section
+          className="masonry-feed search-masonry-feed"
+          aria-live="polite"
+          aria-busy={loading}
+          style={{ gridTemplateColumns: `repeat(${masonryColumnCount}, minmax(0, 1fr))` }}
+        >
+          {masonryColumns.map((columnPosts, columnIndex) => (
+            <div className="masonry-column" key={`search-column-${columnIndex}`}>
+              {columnPosts.map((post, rowIndex) => (
+                <PostCard
+                  key={post.id}
+                  post={post}
+                  coverRatio={coverRatios.get(post.id)}
+                  eager={rowIndex < 2}
+                  revealDelay={searchRevealDelay(post)}
+                  likeLoading={likeLoadingIds.has(post.id)}
+                  onLike={() => onLike(post)}
+                  onOpen={() => onOpen(post)}
+                />
+              ))}
+            </div>
+          ))}
+        </section>
+      ) : (
+        <div className="search-user-list">
+          {users.map((user) => (
+            <SearchUserCard
+              key={user.id}
+              user={user}
+              followLoading={followLoadingIds.has(user.id)}
+              reveal={revealIds.has(`user:${user.id}`)}
+              onToggleFollow={() => onToggleUserFollow(user)}
+            />
+          ))}
+        </div>
+      ) : loading ? (
+        <div className="search-results__loading search-results__loading--small"><i /><span>正在更新筛选结果</span></div>
+      ) : !error ? (
+        <div className="search-results__empty">
+          <span>⌕</span>
+          <h2>没有找到相关{searchType === "general" ? "内容" : "用户"}</h2>
+          <p>试试更短的关键词，或换一个筛选条件。</p>
+        </div>
+      ) : null}
+
+    </section>
+  );
+}
+
 function FeedSkeleton({ columns }: { columns: number }) {
   const skeletonColumns = Array.from({ length: columns }, () => [] as number[]);
   Array.from({ length: 12 }).forEach((_, index) => {
@@ -615,8 +998,44 @@ function parseHashRoute(): { id: string; kind: "post" | "article" } | null {
   return match ? { kind: match[1] as "post" | "article", id: decodeURIComponent(match[2]) } : null;
 }
 
+type SearchRoute = {
+  query: string;
+  searchType: SearchType;
+  selection: SearchFilterSelection;
+};
+
+function parseSearchRoute(): SearchRoute | null {
+  if (!location.hash.startsWith("#/search")) return null;
+  const queryStart = location.hash.indexOf("?");
+  const params = new URLSearchParams(queryStart >= 0 ? location.hash.slice(queryStart + 1) : "");
+  const query = (params.get("q") ?? "").trim();
+  if (!query) return null;
+  return {
+    query,
+    searchType: params.get("type") === "user" ? "user" : "general",
+    selection: {
+      filter: params.get("filter") ?? "",
+      sort: params.get("sort") ?? "",
+      timeRange: params.get("time") ?? ""
+    }
+  };
+}
+
+function searchRouteHash(query: string, searchType: SearchType, selection: SearchFilterSelection): string {
+  const params = new URLSearchParams({ q: query, type: searchType });
+  if (selection.filter) params.set("filter", selection.filter);
+  if (selection.sort) params.set("sort", selection.sort);
+  if (selection.timeRange) params.set("time", selection.timeRange);
+  return `#/search?${params.toString()}`;
+}
+
+function feedRouteHash(): string {
+  return "#/feed";
+}
+
 export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppProps) {
   const isDemo = Boolean(demoPosts);
+  const initialSearchRoute = parseSearchRoute();
   const [posts, setPosts] = useState<FeedPost[]>(demoPosts ?? []);
   const [view, setView] = useState<ViewMode>("discover");
   const [communities, setCommunities] = useState<Community[]>(demoCommunities);
@@ -625,6 +1044,22 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   const [themePreference, setThemePreference] = useState<ThemePreference>(readLocalThemePreference);
   const [systemDark, setSystemDark] = useState(prefersDarkColorScheme);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [searchInput, setSearchInput] = useState(initialSearchRoute?.query ?? "");
+  const [searchQuery, setSearchQuery] = useState(initialSearchRoute?.query ?? "");
+  const [searchType, setSearchType] = useState<SearchType>(initialSearchRoute?.searchType ?? "general");
+  const [searchResult, setSearchResult] = useState<SearchResult>();
+  const [searchFilterSelection, setSearchFilterSelection] = useState<SearchFilterSelection>(initialSearchRoute?.selection ?? EMPTY_SEARCH_FILTER_SELECTION);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string>();
+  const [searchHistory, setSearchHistory] = useState<string[]>([]);
+  const [searchFound, setSearchFound] = useState<string[]>([]);
+  const [searchSuggestions, setSearchSuggestions] = useState<SearchSuggestion[]>([]);
+  const [searchSuggestionLoading, setSearchSuggestionLoading] = useState(false);
+  const [searchLandingLoading, setSearchLandingLoading] = useState(false);
+  const [searchLandingError, setSearchLandingError] = useState<string>();
+  const [searchRevealIds, setSearchRevealIds] = useState<Set<string>>(new Set());
+  const [searchFollowLoadingIds, setSearchFollowLoadingIds] = useState<Set<string>>(new Set());
+  const [searchFocused, setSearchFocused] = useState(false);
   const [communityError, setCommunityError] = useState<string>();
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [initialLoading, setInitialLoading] = useState(!isDemo);
@@ -656,6 +1091,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   const selectedKindsTouched = useRef(false);
   const themePreferenceTouched = useRef(false);
   const feedScrollRef = useRef<HTMLDivElement>(null);
+  const searchBoxRef = useRef<HTMLFormElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const communityListRef = useRef<HTMLDivElement>(null);
   const kindFilterRef = useRef<HTMLDivElement>(null);
@@ -670,8 +1106,15 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   const replyRequestKeysRef = useRef<Map<string, string>>(new Map());
   const imageNoticeTimerRef = useRef<number | null>(null);
   const feedRevealTimerRef = useRef<number | null>(null);
+  const searchRevealTimerRef = useRef<number | null>(null);
   const feedCoverRatiosRef = useRef<Map<string, number>>(new Map());
+  const searchCoverRatiosRef = useRef<Map<string, number>>(new Map());
   const feedPostIdsRef = useRef<Set<string>>(new Set((demoPosts ?? []).map((post) => post.id)));
+  const searchGenerationRef = useRef(0);
+  const suggestionGenerationRef = useRef(0);
+  const searchLandingRequestedRef = useRef(false);
+  const searchUserFollowIdsRef = useRef<Set<string>>(new Set());
+  const searchResultIdsRef = useRef<Set<string>>(new Set());
   const masonryColumnCountRef = useRef(masonryColumnCount);
   masonryColumnCountRef.current = masonryColumnCount;
   const resolvedTheme = resolveTheme(themePreference, systemDark);
@@ -713,9 +1156,28 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     }, longestDelay + FEED_REVEAL_DURATION_MS + 40);
   }, []);
 
+  const stageSearchReveal = useCallback((result: SearchResult, replace = false) => {
+    if (searchRevealTimerRef.current !== null) window.clearTimeout(searchRevealTimerRef.current);
+    if (replace) searchResultIdsRef.current.clear();
+    const additions = [
+      ...result.posts.map((post) => `post:${post.id}`),
+      ...result.users.map((user) => `user:${user.id}`)
+    ].filter((id) => {
+      if (searchResultIdsRef.current.has(id)) return false;
+      searchResultIdsRef.current.add(id);
+      return true;
+    });
+    setSearchRevealIds(new Set(additions));
+    searchRevealTimerRef.current = window.setTimeout(() => {
+      setSearchRevealIds(new Set());
+      searchRevealTimerRef.current = null;
+    }, FEED_REVEAL_DURATION_MS + Math.max(0, additions.length - 1) * FEED_REVEAL_STAGGER_MS + 80);
+  }, []);
+
   useEffect(() => () => {
     if (imageNoticeTimerRef.current !== null) window.clearTimeout(imageNoticeTimerRef.current);
     if (feedRevealTimerRef.current !== null) window.clearTimeout(feedRevealTimerRef.current);
+    if (searchRevealTimerRef.current !== null) window.clearTimeout(searchRevealTimerRef.current);
   }, []);
 
   useLayoutEffect(() => {
@@ -804,6 +1266,91 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     }).catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const restore = (value: unknown) => {
+      if (!cancelled) setSearchHistory(readSearchHistory(value));
+    };
+    try {
+      const raw = window.localStorage.getItem(SEARCH_HISTORY_KEY);
+      if (!raw) {
+        restore([]);
+      } else {
+        try {
+          restore(JSON.parse(raw));
+        } catch {
+          restore(raw);
+        }
+      }
+    } catch {
+      restore([]);
+    }
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!searchFocused) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      const node = searchBoxRef.current;
+      if (!node || !event.composedPath().includes(node)) setSearchFocused(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSearchFocused(false);
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [searchFocused]);
+
+  useEffect(() => {
+    if (!searchFocused || searchLandingRequestedRef.current) return;
+    searchLandingRequestedRef.current = true;
+    let cancelled = false;
+    setSearchLandingLoading(true);
+    setSearchLandingError(undefined);
+    Promise.allSettled([fetchSearchWelcomePage(), fetchSearchFound()]).then(([welcome, found]) => {
+      if (cancelled) return;
+      const foundNames = found.status === "fulfilled" && found.value.length > 0
+        ? found.value
+        : welcome.status === "fulfilled" ? welcome.value.map((item) => item.text) : [];
+      setSearchFound(foundNames);
+      if (found.status === "rejected" && welcome.status === "rejected") {
+        setSearchLandingError("官方搜索发现暂时不可用");
+      }
+      setSearchLandingLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [searchFocused]);
+
+  useEffect(() => {
+    const query = searchInput.trim();
+    suggestionGenerationRef.current += 1;
+    const generation = suggestionGenerationRef.current;
+    if (!searchFocused || searchQuery || !query) {
+      setSearchSuggestions([]);
+      setSearchSuggestionLoading(false);
+      return;
+    }
+    setSearchSuggestionLoading(true);
+    const timer = window.setTimeout(() => {
+      void fetchSearchSuggestions(query).then((suggestions) => {
+        if (suggestionGenerationRef.current === generation) {
+          setSearchSuggestions(suggestions);
+          setSearchSuggestionLoading(false);
+        }
+      }).catch(() => {
+        if (suggestionGenerationRef.current === generation) {
+          setSearchSuggestions([]);
+          setSearchSuggestionLoading(false);
+        }
+      });
+    }, 260);
+    return () => window.clearTimeout(timer);
+  }, [searchFocused, searchInput, searchQuery]);
+
   const loadCommunities = useCallback(async () => {
     if (isDemo) return;
     setCommunityError(undefined);
@@ -833,6 +1380,198 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [filterOpen]);
+
+  function rememberSearch(query: string) {
+    const normalized = query.trim();
+    if (!normalized) return;
+    setSearchHistory((current) => {
+      const next = [normalized, ...current.filter((item) => item !== normalized)].slice(0, 10);
+      try {
+        window.localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(next));
+      } catch {
+        // Keep the in-memory history when storage is unavailable.
+      }
+      return next;
+    });
+  }
+
+  const clearSearchHistory = useCallback(() => {
+    setSearchHistory([]);
+    try {
+      window.localStorage.removeItem(SEARCH_HISTORY_KEY);
+    } catch {
+      // Keep the visible history cleared when storage is unavailable.
+    }
+  }, []);
+
+  function currentSearchWidth(): number {
+    return Math.max(320, Math.round(feedScrollRef.current?.clientWidth || window.innerWidth));
+  }
+
+  const clearSearch = useCallback((syncUrl = true) => {
+    searchGenerationRef.current += 1;
+    suggestionGenerationRef.current += 1;
+    searchResultIdsRef.current.clear();
+    searchCoverRatiosRef.current.clear();
+    setSearchInput("");
+    setSearchQuery("");
+    setSearchResult(undefined);
+    setSearchFilterSelection(EMPTY_SEARCH_FILTER_SELECTION);
+    setSearchError(undefined);
+    setSearchSuggestions([]);
+    setSearchRevealIds(new Set());
+    setSearchLoading(false);
+    setSearchFocused(false);
+    if (syncUrl && location.hash !== feedRouteHash()) {
+      history.replaceState({
+        ...(history.state ?? {}),
+        xiaoheishuDetail: false,
+        xiaoheishuSearch: false
+      }, "", feedRouteHash());
+    }
+    feedScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+  }, []);
+
+  const clearSearchInput = useCallback(() => {
+    suggestionGenerationRef.current += 1;
+    setSearchInput("");
+    setSearchSuggestions([]);
+    setSearchSuggestionLoading(false);
+  }, []);
+
+  const handleSearchInputChange = useCallback((value: string) => {
+    setSearchInput(value);
+    setSearchFocused(true);
+    if (!searchQuery) return;
+    searchGenerationRef.current += 1;
+    searchResultIdsRef.current.clear();
+    searchCoverRatiosRef.current.clear();
+    setSearchQuery("");
+    setSearchResult(undefined);
+    setSearchFilterSelection(EMPTY_SEARCH_FILTER_SELECTION);
+    setSearchError(undefined);
+    setSearchLoading(false);
+    if (location.hash !== feedRouteHash()) {
+      history.replaceState({
+        ...(history.state ?? {}),
+        xiaoheishuDetail: false,
+        xiaoheishuSearch: false
+      }, "", feedRouteHash());
+    }
+  }, [searchQuery]);
+
+  const runSearch = useCallback(async (
+    rawQuery: string,
+    requestedType: SearchType = searchType,
+    requestedSelection?: SearchFilterSelection,
+    syncUrl = true
+  ) => {
+    const query = rawQuery.trim();
+    if (!query) return;
+    const sameSearch = query === searchQuery && requestedType === searchType;
+    const selection = requestedSelection ?? (sameSearch ? searchFilterSelection : EMPTY_SEARCH_FILTER_SELECTION);
+    const generation = searchGenerationRef.current + 1;
+    searchGenerationRef.current = generation;
+    if (!sameSearch) {
+      searchResultIdsRef.current.clear();
+      searchCoverRatiosRef.current.clear();
+    }
+    setSearchInput(query);
+    setSearchQuery(query);
+    setSearchType(requestedType);
+    setSearchFilterSelection(selection);
+    if (!sameSearch) setSearchResult(undefined);
+    setSearchError(undefined);
+    setSearchSuggestions([]);
+    setSearchLoading(true);
+    setSearchFocused(false);
+    rememberSearch(query);
+    if (syncUrl) {
+      const nextHash = searchRouteHash(query, requestedType, selection);
+      const nextState = {
+        ...(history.state ?? {}),
+        xiaoheishuDetail: false,
+        xiaoheishuSearch: true
+      };
+      if (sameSearch) history.replaceState(nextState, "", nextHash);
+      else history.pushState(nextState, "", nextHash);
+    }
+    feedScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    try {
+      const result = await fetchSearchPage(
+        query,
+        requestedType,
+        0,
+        currentSearchWidth(),
+        selection
+      );
+      if (searchGenerationRef.current !== generation) return;
+      const coverRatios = requestedType === "general"
+        ? await preloadFeedCoverRatios(result.posts, () => searchGenerationRef.current === generation)
+        : new Map<string, number>();
+      if (searchGenerationRef.current !== generation) return;
+      coverRatios.forEach((ratio, postId) => searchCoverRatiosRef.current.set(postId, ratio));
+      setSearchResult(result);
+      stageSearchReveal(result, true);
+    } catch (error) {
+      if (searchGenerationRef.current !== generation) return;
+      setSearchError(error instanceof Error ? error.message : "搜索请求失败");
+    } finally {
+      if (searchGenerationRef.current === generation) setSearchLoading(false);
+    }
+  }, [searchFilterSelection, searchQuery, searchType, stageSearchReveal]);
+
+  useEffect(() => {
+    const route = parseSearchRoute();
+    if (route) void runSearch(route.query, route.searchType, route.selection, false);
+  }, []);
+
+  const loadMoreSearch = useCallback(async () => {
+    if (
+      !searchResult?.hasMore
+      || searchLoading
+      || !searchQuery
+      || (searchType === "general" && selectedKinds.size === 0)
+    ) return;
+    const generation = searchGenerationRef.current;
+    setSearchLoading(true);
+    try {
+      const next = await fetchSearchPage(
+        searchQuery,
+        searchType,
+        searchResult.nextOffset,
+        currentSearchWidth(),
+        searchFilterSelection
+      );
+      if (searchGenerationRef.current !== generation) return;
+      const coverRatios = searchType === "general"
+        ? await preloadFeedCoverRatios(next.posts, () => searchGenerationRef.current === generation)
+        : new Map<string, number>();
+      if (searchGenerationRef.current !== generation) return;
+      coverRatios.forEach((ratio, postId) => searchCoverRatiosRef.current.set(postId, ratio));
+      setSearchResult((current) => {
+        if (!current) return next;
+        return {
+          ...current,
+          posts: mergePosts(current.posts, next.posts),
+          users: [...current.users, ...next.users.filter((user) => !current.users.some((item) => item.id === user.id))],
+          filters: next.filters.filterList.length || next.filters.sortFilterList.length || next.filters.timeRangeList.length
+            ? next.filters
+            : current.filters,
+          hasMore: next.hasMore,
+          nextOffset: next.nextOffset
+        };
+      });
+      stageSearchReveal(next);
+      setSearchError(undefined);
+    } catch (error) {
+      if (searchGenerationRef.current === generation) {
+        setSearchError(error instanceof Error ? error.message : "搜索下一页加载失败");
+      }
+    } finally {
+      if (searchGenerationRef.current === generation) setSearchLoading(false);
+    }
+  }, [searchFilterSelection, searchLoading, searchQuery, searchResult, searchType, selectedKinds.size, stageSearchReveal]);
 
   useEffect(() => {
     const activeButton = Array.from(communityListRef.current?.querySelectorAll<HTMLButtonElement>("button[data-community-id]") ?? [])
@@ -934,9 +1673,10 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   }, [isDemo, selectedCommunityId, stageFeedReveal]);
 
   const refreshDiscover = useCallback(() => {
+    clearSearch();
     setView("discover");
     void loadInitial();
-  }, [loadInitial]);
+  }, [clearSearch, loadInitial]);
 
   useEffect(() => { void loadInitial(); }, [loadInitial]);
 
@@ -998,8 +1738,12 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     const target = sentinelRef.current;
     const root = feedScrollRef.current;
     if (!target || !root || isDemo) return;
+    const loadNext = () => {
+      if (searchQuery) void loadMoreSearch();
+      else void loadMore();
+    };
     const observer = new IntersectionObserver((entries) => {
-      if (entries[0]?.isIntersecting) void loadMore();
+      if (entries[0]?.isIntersecting) loadNext();
     }, { root, rootMargin: "300px 0px", threshold: 0.01 });
     observer.observe(target);
     let checkFrame = 0;
@@ -1007,12 +1751,12 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       checkFrame = 0;
       const columns = Array.from(root.querySelectorAll<HTMLElement>(".masonry-column"));
       if (!columns.length) {
-        if (root.scrollHeight - root.scrollTop - root.clientHeight < 320) void loadMore();
+        if (root.scrollHeight - root.scrollTop - root.clientHeight < 320) loadNext();
         return;
       }
       const viewportBottom = root.getBoundingClientRect().bottom;
       const shortestColumnBottom = Math.min(...columns.map((column) => column.getBoundingClientRect().bottom));
-      if (shortestColumnBottom - viewportBottom <= root.clientHeight * 1.5) void loadMore();
+      if (shortestColumnBottom - viewportBottom <= root.clientHeight * 1.5) loadNext();
     };
     const scheduleDistanceCheck = () => {
       if (!checkFrame) checkFrame = window.requestAnimationFrame(checkDistance);
@@ -1028,7 +1772,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       resizeObserver?.disconnect();
       observer.disconnect();
     };
-  }, [isDemo, loadMore]);
+  }, [isDemo, loadMore, loadMoreSearch, searchQuery]);
 
   useEffect(() => {
     if (view !== "hot") return;
@@ -1182,20 +1926,35 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
 
   useEffect(() => {
     if (!location.hash) history.replaceState(history.state, "", "#/feed");
+    const resetDetailState = () => {
+      selectedIdRef.current = undefined;
+      setSelectedPost(undefined);
+      setDetail(undefined);
+      setDetailError(undefined);
+      setFollowLoading(false);
+      setPostActionLoading(undefined);
+      setFavoritePickerOpen(false);
+      setFavoriteFolders([]);
+      setLikingCommentIds(new Set());
+      replyRequestKeysRef.current.clear();
+      setLoadingReplyIds(new Set());
+    };
     const onPopState = () => {
+      const searchRoute = parseSearchRoute();
+      if (searchRoute) {
+        resetDetailState();
+        const sameSearch = searchRoute.query === searchQuery
+          && searchRoute.searchType === searchType
+          && searchRoute.selection.filter === searchFilterSelection.filter
+          && searchRoute.selection.sort === searchFilterSelection.sort
+          && searchRoute.selection.timeRange === searchFilterSelection.timeRange;
+        if (!sameSearch) void runSearch(searchRoute.query, searchRoute.searchType, searchRoute.selection, false);
+        return;
+      }
       const route = parseHashRoute();
       if (!route) {
-        selectedIdRef.current = undefined;
-        setSelectedPost(undefined);
-        setDetail(undefined);
-        setDetailError(undefined);
-        setFollowLoading(false);
-        setPostActionLoading(undefined);
-        setFavoritePickerOpen(false);
-        setFavoriteFolders([]);
-        setLikingCommentIds(new Set());
-        replyRequestKeysRef.current.clear();
-        setLoadingReplyIds(new Set());
+        resetDetailState();
+        if (searchQuery) clearSearch(false);
         return;
       }
       if (route.id === selectedIdRef.current) return;
@@ -1204,7 +1963,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [loadDetail, posts]);
+  }, [clearSearch, loadDetail, posts, runSearch, searchFilterSelection, searchQuery, searchType]);
 
   useEffect(() => {
     const route = parseHashRoute();
@@ -1271,10 +2030,45 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     }
   }
 
+  async function toggleSearchUserFollow(user: SearchUser) {
+    const userId = user.id;
+    if (searchUserFollowIdsRef.current.has(userId)) return;
+    const nextFollowing = !Boolean(user.isFollowing);
+    searchUserFollowIdsRef.current.add(userId);
+    setSearchFollowLoadingIds((current) => new Set(current).add(userId));
+    const updateFollowing = (following: boolean) => {
+      setSearchResult((current) => current
+        ? { ...current, users: current.users.map((item) => item.id === userId ? { ...item, isFollowing: following } : item) }
+        : current);
+      setPosts((current) => current.map((post) => post.authorId === userId ? { ...post, isFollowing: following } : post));
+      setDetail((current) => current?.post.authorId === userId ? { ...current, post: { ...current.post, isFollowing: following } } : current);
+      setSelectedPost((current) => current?.authorId === userId ? { ...current, isFollowing: following } : current);
+    };
+
+    updateFollowing(nextFollowing);
+    try {
+      if (!isDemo) await setSearchUserFollowing(userId, nextFollowing);
+      showImageActionNotice(nextFollowing ? `已关注 ${user.username}` : `已取消关注 ${user.username}`);
+    } catch (error) {
+      updateFollowing(!nextFollowing);
+      showImageActionNotice(error instanceof Error ? error.message : "关注状态更新失败", true);
+    } finally {
+      searchUserFollowIdsRef.current.delete(userId);
+      setSearchFollowLoadingIds((current) => {
+        const next = new Set(current);
+        next.delete(userId);
+        return next;
+      });
+    }
+  }
+
   function updatePostAcrossViews(linkId: string, updater: (post: FeedPost) => FeedPost) {
     setDetail((current) => current?.post.id === linkId ? { ...current, post: updater(current.post) } : current);
     setSelectedPost((current) => current?.id === linkId ? updater(current) : current);
     setPosts((current) => current.map((post) => post.id === linkId ? updater(post) : post));
+    setSearchResult((current) => current
+      ? { ...current, posts: current.posts.map((post) => post.id === linkId ? updater(post) : post) }
+      : current);
   }
 
   function setPostLikePending(linkId: string, pending: boolean) {
@@ -1523,10 +2317,117 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
         <main className="main-panel">
           <header className="topbar">
             <BrandWordmark compact />
-            <div className="search-box is-disabled" aria-disabled="true" title="搜索功能暂未开放">
+            <form
+              className={`search-box${searchFocused ? " is-focused" : ""}`}
+              ref={searchBoxRef}
+              role="search"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void runSearch(searchInput, searchType);
+              }}
+            >
               <SearchIcon />
-              <input disabled value="" aria-label="搜索功能暂未开放" placeholder="搜索功能暂未开放" />
-            </div>
+              <input
+                value={searchInput}
+                aria-label="搜索内容或用户"
+                placeholder="搜索内容或用户"
+                onFocus={() => setSearchFocused(true)}
+                onChange={(event) => handleSearchInputChange(event.target.value)}
+              />
+              {searchInput && (
+                <button
+                  className="search-box__clear"
+                  type="button"
+                  aria-label="清空搜索"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    if (searchQuery) clearSearchInput();
+                    else setSearchInput("");
+                  }}
+                >
+                  ×
+                </button>
+              )}
+              {searchFocused && !searchQuery && (
+                <div className="search-popover" role="listbox" aria-label={searchInput.trim() ? "搜索联想" : "搜索入口"}>
+                  {searchInput.trim() ? (
+                    <>
+                      <div className="search-suggestion-list">
+                        {searchSuggestions.map((suggestion) => (
+                          <button
+                            key={suggestion.id}
+                            type="button"
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => void runSearch(suggestion.text, searchType)}
+                          >
+                            <span>{suggestion.text}</span>
+                          </button>
+                        ))}
+                      </div>
+                      {searchSuggestionLoading && searchSuggestions.length === 0 && (
+                        <div className="search-popover__status"><i />正在获取联想词</div>
+                      )}
+                      {!searchSuggestionLoading && searchSuggestions.length === 0 && (
+                        <div className="search-popover__status">按 Enter 搜索“{searchInput.trim()}”</div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {searchHistory.length > 0 && (
+                        <section className="search-popover__section">
+                          <div className="search-popover__heading search-history__heading">
+                            <strong>历史记录</strong>
+                            <button
+                              className="search-history__clear"
+                              type="button"
+                              aria-label="清空历史记录"
+                              onMouseDown={(event) => event.preventDefault()}
+                              onClick={clearSearchHistory}
+                            >
+                              <TrashIcon />
+                            </button>
+                          </div>
+                          <div className="search-popover__items">
+                            {searchHistory.map((item) => (
+                              <button
+                                key={item}
+                                type="button"
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={() => void runSearch(item, searchType)}
+                              >
+                                {item}
+                              </button>
+                            ))}
+                          </div>
+                        </section>
+                      )}
+                      <section className="search-popover__section search-popover__section--found">
+                        <div className="search-popover__heading"><strong>猜你想搜</strong></div>
+                        {searchFound.length > 0 ? (
+                          <div className="search-guess-list">
+                            {searchFound.map((item) => (
+                              <button
+                                key={item}
+                                type="button"
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={() => void runSearch(item, searchType)}
+                              >
+                                <span>{item}</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : searchLandingLoading ? (
+                          <div className="search-popover__status"><i />正在加载官方发现</div>
+                        ) : (
+                          <div className="search-popover__status">暂时没有官方发现</div>
+                        )}
+                      </section>
+                      {searchLandingError && <p className="search-popover__error">{searchLandingError}</p>}
+                    </>
+                  )}
+                </div>
+              )}
+            </form>
             <div className="top-actions">
               <button type="button" onClick={refreshDiscover} disabled={initialLoading || isDemo} title="刷新信息流"><RefreshIcon className={initialLoading ? "spin" : ""} /></button>
               <button type="button" onClick={requestOriginalMode} title="切换到原版论坛"><ExternalIcon /></button>
@@ -1534,6 +2435,31 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
           </header>
 
           <div className="feed-scroll" ref={feedScrollRef}>
+            {searchQuery ? (
+              <SearchResultPanel
+                result={searchResult}
+                searchType={searchType}
+                loading={searchLoading}
+                error={searchError}
+                likeLoadingIds={likingPostIds}
+                followLoadingIds={searchFollowLoadingIds}
+                filterSelection={searchFilterSelection}
+                selectedKinds={selectedKinds}
+                masonryColumnCount={masonryColumnCount}
+                coverRatios={searchCoverRatiosRef.current}
+                revealIds={searchRevealIds}
+                onTypeChange={(type) => {
+                  void runSearch(searchQuery, type);
+                }}
+                onFilterChange={(selection) => void runSearch(searchQuery, searchType, selection)}
+                onToggleKind={toggleKind}
+                onSelectAllKinds={selectAllKinds}
+                onToggleUserFollow={(user) => void toggleSearchUserFollow(user)}
+                onRetry={() => void runSearch(searchQuery, searchType)}
+                onLike={(post) => void togglePostLike(post)}
+                onOpen={(post) => void loadDetail(post)}
+              />
+            ) : <>
             <div className="community-toolbar">
               <div
                 className="community-list"
@@ -1650,10 +2576,15 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
                 <button type="button" onClick={resetFeedSelection}>{selectedKinds.size === 0 ? "显示全部类型" : "回到推荐"}</button>
               </section>
             ) : null}
+            </>}
 
             <div className="feed-sentinel" ref={sentinelRef}>
-              {loadingMore && <><i /><span>正在加载下一页</span></>}
-              {!hasMore && posts.length > 0 && <span>已经看到这一批内容的末尾</span>}
+              {searchQuery
+                ? searchLoading && searchResult && <><i /><span>正在加载下一页</span></>
+                : loadingMore && <><i /><span>正在加载下一页</span></>}
+              {searchQuery
+                ? searchResult && !searchResult.hasMore && <span>已经看到这一批内容的末尾</span>
+                : !hasMore && posts.length > 0 && <span>已经看到这一批内容的末尾</span>}
             </div>
           </div>
 

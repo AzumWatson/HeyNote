@@ -144,7 +144,7 @@ function mount(): void {
     };
 
     try {
-      const hash = /^#\/(?:feed(?:[/?]|$)|(?:post|article)\/[^/?#]+(?:[/?]|$))/.test(location.hash)
+      const hash = /^#\/(?:feed(?:[/?]|$)|search(?:[/?]|$)|(?:post|article)\/[^/?#]+(?:[/?]|$))/.test(location.hash)
         ? location.hash
         : "#/feed";
       history.replaceState(history.state, "", `${HOME_PATH}${hash}`);

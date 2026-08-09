@@ -131,6 +131,63 @@ export interface FeedResult {
   lastValue?: string;
 }
 
+export type SearchType = "general" | "user";
+
+export interface SearchSuggestion {
+  id: string;
+  text: string;
+  iconUrl?: string;
+  kind?: string;
+}
+
+export interface SearchMedal {
+  id?: number;
+  name: string;
+  imageUrl?: string;
+  achieved?: boolean;
+  worn?: boolean;
+  description?: string;
+}
+
+export interface SearchUser {
+  id: string;
+  username: string;
+  avatar?: string;
+  level?: string;
+  recTag?: string;
+  isFollowing?: boolean;
+  medals: SearchMedal[];
+}
+
+export interface SearchFilterOption {
+  id: string;
+  name: string;
+  value: string;
+  selected?: boolean;
+}
+
+export interface SearchFilters {
+  filterList: SearchFilterOption[];
+  sortFilterList: SearchFilterOption[];
+  timeRangeList: SearchFilterOption[];
+}
+
+export interface SearchFilterSelection {
+  filter: string;
+  sort: string;
+  timeRange: string;
+}
+
+export interface SearchResult {
+  query: string;
+  searchType: SearchType;
+  posts: FeedPost[];
+  users: SearchUser[];
+  filters: SearchFilters;
+  hasMore: boolean;
+  nextOffset: number;
+}
+
 export interface DetailResult {
   detail: PostDetail;
 }
@@ -151,6 +208,10 @@ export type HeyboxApiOperation =
   | "feed"
   | "feedBanner"
   | "communityFeed"
+  | "search"
+  | "searchWelcome"
+  | "searchFound"
+  | "searchSuggestion"
   | "detail"
   | "comments"
   | "commentReplies"
@@ -160,7 +221,9 @@ export type HeyboxApiOperation =
   | "favoritePost"
   | "likeComment"
   | "followUser"
-  | "unfollowUser";
+  | "unfollowUser"
+  | "followSearchUser"
+  | "unfollowSearchUser";
 
 export type HeyboxApiRequest =
   | {
@@ -177,6 +240,30 @@ export type HeyboxApiRequest =
       channel: "xiaoheishu-api";
       operation: "communityFeed";
       params: { topicId: string; offset: number; width: number; lastValue: string };
+    }
+  | {
+      channel: "xiaoheishu-api";
+      operation: "search";
+      params: {
+        query: string;
+        searchType: SearchType;
+        offset: number;
+        limit: number;
+        width: number;
+        filterTag?: string;
+        sortFilter?: string;
+        timeRange?: string;
+      };
+    }
+  | {
+      channel: "xiaoheishu-api";
+      operation: "searchWelcome" | "searchFound";
+      params: { [key: string]: never };
+    }
+  | {
+      channel: "xiaoheishu-api";
+      operation: "searchSuggestion";
+      params: { query: string };
     }
   | {
       channel: "xiaoheishu-api";
@@ -222,6 +309,11 @@ export type HeyboxApiRequest =
       channel: "xiaoheishu-api";
       operation: "followUser" | "unfollowUser";
       params: { linkId: string; followingId: string };
+    }
+  | {
+      channel: "xiaoheishu-api";
+      operation: "followSearchUser" | "unfollowSearchUser";
+      params: { userId: string };
     };
 
 export type HeyboxApiResponse =

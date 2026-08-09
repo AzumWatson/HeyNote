@@ -46,6 +46,10 @@ export function CloseIcon(props: IconProps) {
   return <IconBase {...props}><path d="m6 6 12 12M18 6 6 18" /></IconBase>;
 }
 
+export function TrashIcon(props: IconProps) {
+  return <IconBase {...props}><path d="M5 7h14M10 11v5M14 11v5M8 7l.8-2h6.4l.8 2M7 7l.7 13h8.6L17 7" /></IconBase>;
+}
+
 export function HeartIcon({ fill = "none", ...props }: IconProps) {
   return <IconBase fill={fill} {...props}><path d="M20.8 8.8c0 5.2-8.8 10.1-8.8 10.1S3.2 14 3.2 8.8A4.4 4.4 0 0 1 12 8a4.4 4.4 0 0 1 8.8.8Z" /></IconBase>;
 }

@@ -2,7 +2,7 @@ type JsonScalar = string | number | boolean | null;
 
 interface HeyboxApiMessage {
   channel: "xiaoheishu-api";
-  operation: "feed" | "feedBanner" | "communityFeed" | "detail" | "comments" | "commentReplies" | "originalImage" | "favoriteFolders" | "likePost" | "favoritePost" | "likeComment" | "followUser" | "unfollowUser";
+  operation: "feed" | "feedBanner" | "communityFeed" | "search" | "searchWelcome" | "searchFound" | "searchSuggestion" | "detail" | "comments" | "commentReplies" | "originalImage" | "favoriteFolders" | "likePost" | "favoritePost" | "likeComment" | "followUser" | "unfollowUser" | "followSearchUser" | "unfollowSearchUser";
   params?: Record<string, JsonScalar>;
 }
 
@@ -48,6 +48,10 @@ const OPERATION_PATHS: Record<HeyboxApiMessage["operation"], string> = {
   feed: "/bbs/app/feeds",
   feedBanner: "/bbs/app/feeds/banner",
   communityFeed: "/bbs/app/topic/feeds",
+  search: "/bbs/app/api/general/search/v1",
+  searchWelcome: "/bbs/app/api/search/welcome_page/v2",
+  searchFound: "/bbs/app/api/search/found",
+  searchSuggestion: "/bbs/app/api/search/suggestion/v2",
   detail: "/bbs/app/link/tree",
   comments: "/bbs/app/link/tree",
   commentReplies: "/bbs/app/comment/sub/comments",
@@ -57,7 +61,9 @@ const OPERATION_PATHS: Record<HeyboxApiMessage["operation"], string> = {
   favoritePost: "/bbs/app/link/favour",
   likeComment: "/bbs/app/comment/support",
   followUser: "/bbs/app/profile/follow/user",
-  unfollowUser: "/bbs/app/profile/follow/user/cancel"
+  unfollowUser: "/bbs/app/profile/follow/user/cancel",
+  followSearchUser: "/bbs/app/profile/follow/user",
+  unfollowSearchUser: "/bbs/app/profile/follow/user/cancel"
 };
 
 const WORKSHOP_API_OPERATIONS = new Set<HeyboxApiMessage["operation"]>([
@@ -294,6 +300,24 @@ function requireExactKeys(params: Record<string, unknown>, expected: string[]): 
   }
 }
 
+function requireKeys(
+  params: Record<string, unknown>,
+  required: string[],
+  optional: string[]
+): void {
+  const actual = Object.keys(params);
+  const missing = required.filter((key) => !Object.prototype.hasOwnProperty.call(params, key));
+  const allowed = new Set([...required, ...optional]);
+  const unexpected = actual.filter((key) => !allowed.has(key));
+  if (missing.length || unexpected.length) {
+    const details = [
+      missing.length ? `缺少 ${missing.join(", ")}` : "",
+      unexpected.length ? `不允许 ${unexpected.join(", ")}` : ""
+    ].filter(Boolean).join("；");
+    throw new Error(`API params 字段不正确：${details}`);
+  }
+}
+
 function finiteNumber(value: unknown, name: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new Error(`API 参数 ${name} 必须是有限数字`);
@@ -416,6 +440,71 @@ function queryParamsFor(
     };
   }
 
+  if (operation === "search") {
+    requireKeys(
+      params,
+      ["query", "searchType", "offset", "limit", "width"],
+      ["filterTag", "sortFilter", "timeRange"]
+    );
+    if (typeof params.query !== "string") throw new Error("API 参数 query 必须是字符串");
+    const query = params.query.trim();
+    if (!query || query.length > 120 || /[\u0000-\u001f\u007f]/.test(query)) {
+      throw new Error("API 参数 query 不能为空或格式不正确");
+    }
+    if (params.searchType !== "general" && params.searchType !== "user") {
+      throw new Error("API 参数 searchType 不受支持");
+    }
+    const offset = finiteNumber(params.offset, "offset");
+    const limit = finiteNumber(params.limit, "limit");
+    if (!Number.isInteger(offset) || offset % 30 !== 0 || offset < 0 || offset > 10_000_000) {
+      throw new Error("API 参数 offset 必须是 0、30、60……这样的分页偏移量");
+    }
+    if (!Number.isInteger(limit) || limit !== 30) {
+      throw new Error("API 参数 limit 必须固定为 30");
+    }
+    const width = finiteNumber(params.width, "width");
+    const filterTag = params.filterTag;
+    const sortFilter = params.sortFilter;
+    const timeRange = params.timeRange;
+    for (const [name, value] of [
+      ["filterTag", filterTag],
+      ["sortFilter", sortFilter],
+      ["timeRange", timeRange]
+    ] as const) {
+      if (value === undefined) continue;
+      if (typeof value !== "string") throw new Error("API 参数筛选值必须是字符串");
+      if (value.length > 120 || /[\u0000-\u001f\u007f]/.test(value)) {
+        throw new Error(`API 参数 ${name} 格式不正确`);
+      }
+    }
+    return {
+      q: query,
+      search_type: params.searchType,
+      is_pull_down: 0,
+      offset,
+      limit,
+      dw: Math.min(3_840, Math.max(320, Math.round(width))),
+      ...(typeof filterTag === "string" && filterTag ? { filter_tag: filterTag } : {}),
+      ...(typeof sortFilter === "string" && sortFilter ? { sort_filter: sortFilter } : {}),
+      ...(typeof timeRange === "string" && timeRange ? { time_range: timeRange } : {})
+    };
+  }
+
+  if (operation === "searchWelcome" || operation === "searchFound") {
+    requireExactKeys(params, []);
+    return {};
+  }
+
+  if (operation === "searchSuggestion") {
+    requireExactKeys(params, ["query"]);
+    if (typeof params.query !== "string") throw new Error("API 参数 query 必须是字符串");
+    const query = params.query.trim();
+    if (!query || query.length > 120 || /[\u0000-\u001f\u007f]/.test(query)) {
+      throw new Error("API 参数 query 不能为空或格式不正确");
+    }
+    return { q: query };
+  }
+
   if (operation === "detail") {
     requireExactKeys(params, ["linkId"]);
     return {
@@ -486,6 +575,13 @@ function queryParamsFor(
     return {
       link_id: linkIdValue(params.linkId),
       following_id: commentIdValue(params.followingId, "followingId")
+    };
+  }
+
+  if (operation === "followSearchUser" || operation === "unfollowSearchUser") {
+    requireExactKeys(params, ["userId"]);
+    return {
+      following_id: commentIdValue(params.userId, "userId")
     };
   }
 
@@ -899,6 +995,10 @@ async function handleApiMessage(
     operation !== "feed"
     && operation !== "feedBanner"
     && operation !== "communityFeed"
+    && operation !== "search"
+    && operation !== "searchWelcome"
+    && operation !== "searchFound"
+    && operation !== "searchSuggestion"
     && operation !== "detail"
     && operation !== "comments"
     && operation !== "commentReplies"
@@ -909,6 +1009,8 @@ async function handleApiMessage(
     && operation !== "likeComment"
     && operation !== "followUser"
     && operation !== "unfollowUser"
+    && operation !== "followSearchUser"
+    && operation !== "unfollowSearchUser"
   ) {
     return { ok: false, error: "不支持的 API operation" };
   }
@@ -940,6 +1042,8 @@ async function handleApiMessage(
         params,
         operation === "followUser"
           || operation === "unfollowUser"
+          || operation === "followSearchUser"
+          || operation === "unfollowSearchUser"
           || operation === "likePost"
           || operation === "favoritePost"
           || operation === "likeComment" ? "POST" : "GET",
