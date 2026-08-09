@@ -1273,6 +1273,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   const [searchRevealIds, setSearchRevealIds] = useState<Set<string>>(new Set());
   const [searchFollowLoadingIds, setSearchFollowLoadingIds] = useState<Set<string>>(new Set());
   const [searchFocused, setSearchFocused] = useState(false);
+  const [searchEditing, setSearchEditing] = useState(false);
   const [communityError, setCommunityError] = useState<string>();
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [initialLoading, setInitialLoading] = useState(!isDemo && !initialProfileId);
@@ -1591,7 +1592,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     const query = searchInput.trim();
     suggestionGenerationRef.current += 1;
     const generation = suggestionGenerationRef.current;
-    if (!searchFocused || searchQuery || !query) {
+    if (!searchFocused || (!searchEditing && searchQuery) || !query) {
       setSearchSuggestions([]);
       setSearchSuggestionLoading(false);
       return;
@@ -1611,7 +1612,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       });
     }, 260);
     return () => window.clearTimeout(timer);
-  }, [searchFocused, searchInput, searchQuery]);
+  }, [searchEditing, searchFocused, searchInput, searchQuery]);
 
   const loadCommunities = useCallback(async () => {
     if (isDemo) return;
@@ -1715,6 +1716,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     setSearchRevealIds(new Set());
     setSearchLoading(false);
     setSearchFocused(false);
+    setSearchEditing(false);
     if (syncUrl && (location.pathname !== "/app/bbs/home" || location.hash !== feedRouteHash())) {
       history.replaceState({
         ...(history.state ?? {}),
@@ -1730,27 +1732,16 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     setSearchInput("");
     setSearchSuggestions([]);
     setSearchSuggestionLoading(false);
-  }, []);
+    setSearchEditing(Boolean(searchQuery));
+  }, [searchQuery]);
 
   const handleSearchInputChange = useCallback((value: string) => {
+    suggestionGenerationRef.current += 1;
     setSearchInput(value);
     setSearchFocused(true);
-    if (!searchQuery) return;
-    searchGenerationRef.current += 1;
-    searchResultIdsRef.current.clear();
-    searchCoverRatiosRef.current.clear();
-    setSearchQuery("");
-    setSearchResult(undefined);
-    setSearchFilterSelection(EMPTY_SEARCH_FILTER_SELECTION);
-    setSearchError(undefined);
-    setSearchLoading(false);
-    if (location.pathname !== "/app/bbs/home" || location.hash !== feedRouteHash()) {
-      history.replaceState({
-        ...(history.state ?? {}),
-        xiaoheishuDetail: false,
-        xiaoheishuSearch: false
-      }, "", appFeedUrl());
-    }
+    setSearchSuggestions([]);
+    setSearchSuggestionLoading(false);
+    if (searchQuery) setSearchEditing(true);
   }, [searchQuery]);
 
   const runSearch = useCallback(async (
@@ -1773,11 +1764,13 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     setSearchQuery(query);
     setSearchType(requestedType);
     setSearchFilterSelection(selection);
+    setView("discover");
     if (!sameSearch) setSearchResult(undefined);
     setSearchError(undefined);
     setSearchSuggestions([]);
     setSearchLoading(true);
     setSearchFocused(false);
+    setSearchEditing(false);
     rememberSearch(query);
     if (syncUrl) {
       const nextHash = searchRouteHash(query, requestedType, selection);
@@ -2252,8 +2245,8 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     const root = feedScrollRef.current;
     if (!target || !root || isDemo) return;
     const loadNext = () => {
-      if (view === "profile") void loadMoreProfile();
-      else if (searchQuery) void loadMoreSearch();
+      if (searchQuery) void loadMoreSearch();
+      else if (view === "profile") void loadMoreProfile();
       else void loadMore();
     };
     const observer = new IntersectionObserver((entries) => {
@@ -2879,7 +2872,8 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     }
   }
 
-  const isOwnProfile = !searchQuery
+  const isSearchMode = Boolean(searchQuery || searchFocused || searchEditing);
+  const isOwnProfile = !isSearchMode
     && view === "profile"
     && Boolean(profileUser && currentUser && profileUser.id === currentUser.id);
   const activeProfileId = parseUserProfileRoute() ?? profileUser?.id ?? currentUser?.id ?? "";
@@ -2892,8 +2886,8 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
 
           <nav className="side-nav" aria-label="信息流导航">
             <button
-              className={view === "discover" && !searchQuery ? "active" : ""}
-              aria-current={view === "discover" && !searchQuery ? "page" : undefined}
+              className={view === "discover" && !isSearchMode ? "active" : ""}
+              aria-current={view === "discover" && !isSearchMode ? "page" : undefined}
               onClick={refreshDiscover}
             ><CompassIcon /><span>发现</span></button>
             <button
@@ -2953,7 +2947,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
                   ×
                 </button>
               )}
-              {searchFocused && !searchQuery && (
+              {searchFocused && (searchEditing || !searchQuery) && (
                 <div className="search-popover" role="listbox" aria-label={searchInput.trim() ? "搜索联想" : "搜索入口"}>
                   {searchInput.trim() ? (
                     <>
@@ -3212,15 +3206,15 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
             </>}
 
             <div className="feed-sentinel" ref={sentinelRef}>
-              {view === "profile"
-                ? profileLoadingMore && <><i /><span>正在加载下一页</span></>
-                : searchQuery
-                  ? searchLoading && searchResult && <><i /><span>正在加载下一页</span></>
+              {searchQuery
+                ? searchLoading && searchResult && <><i /><span>正在加载下一页</span></>
+                : view === "profile"
+                  ? profileLoadingMore && <><i /><span>正在加载下一页</span></>
                   : loadingMore && <><i /><span>正在加载下一页</span></>}
-              {view === "profile"
-                ? !profileHasMore && profilePosts.length > 0 && <span>已经看到这一批内容的末尾</span>
-                : searchQuery
-                  ? searchResult && !searchResult.hasMore && <span>已经看到这一批内容的末尾</span>
+              {searchQuery
+                ? searchResult && !searchResult.hasMore && <span>已经看到这一批内容的末尾</span>
+                : view === "profile"
+                  ? !profileHasMore && profilePosts.length > 0 && <span>已经看到这一批内容的末尾</span>
                   : !hasMore && posts.length > 0 && <span>已经看到这一批内容的末尾</span>}
             </div>
           </div>
