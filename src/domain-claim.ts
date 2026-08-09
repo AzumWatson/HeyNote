@@ -7,13 +7,17 @@ interface InternalResponse {
 
 const MODE_KEY = "xiaoheishu:browse-mode";
 const HOME_PATH = "/app/bbs/home";
+const USER_PROFILE_PATH_PREFIX = "/app/user/profile/";
 const TOGGLE_HOST_ID = "xiaoheishu-mode-toggle";
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 
-function isHomeRoute(): boolean {
+function isSupportedRoute(): boolean {
   return location.protocol === "https:"
     && location.hostname === "www.xiaoheihe.cn"
-    && location.pathname === HOME_PATH;
+    && (
+      location.pathname === HOME_PATH
+      || new RegExp(`^${USER_PROFILE_PATH_PREFIX.replaceAll("/", "\\/")}[^/]+\\/?$`).test(location.pathname)
+    );
 }
 
 async function requestModeSwitch(mode: BrowseMode): Promise<void> {
@@ -26,13 +30,12 @@ async function requestModeSwitch(mode: BrowseMode): Promise<void> {
 
   // A real reload is deliberate: it destroys either the original site or the
   // React overlay completely before the other mode starts.
-  history.replaceState(history.state, "", HOME_PATH);
   location.reload();
 }
 
 function mountOriginalModeToggle(label = "切换到小黑书"): void {
   const attach = () => {
-    if (!isHomeRoute() || document.getElementById(TOGGLE_HOST_ID)) return;
+    if (!isSupportedRoute() || document.getElementById(TOGGLE_HOST_ID)) return;
     if (document.documentElement.dataset.xiaoheishu === "true") return;
 
     const host = document.createElement("div");
@@ -168,7 +171,7 @@ function mountOriginalModeToggle(label = "切换到小黑书"): void {
 }
 
 async function start(): Promise<void> {
-  if (!isHomeRoute()) return;
+  if (!isSupportedRoute()) return;
   const stored = await chrome.storage.local.get(MODE_KEY);
   const mode: BrowseMode = stored[MODE_KEY] === "original" ? "original" : "xiaoheishu";
 

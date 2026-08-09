@@ -22,6 +22,7 @@ import type {
 import { resolveOriginalImageUrl } from "../data/heybox";
 import { heyboxEmojiFromCode, heyboxEmojiFromId, heyboxEmojiSprite } from "../data/heybox-emoji";
 import { formatCount } from "../format";
+import { userProfileUrl } from "../profile-url";
 import { CommentIcon, StarIcon, ThumbUpIcon } from "../icons";
 import type { ImageActionTarget } from "../image-actions";
 import { GeneratedTextCover } from "./GeneratedTextCover";
@@ -861,8 +862,8 @@ function PostByline({
   onToggleFollow?: () => void;
   followLoading?: boolean;
 }) {
-  return (
-    <div className={`post-byline ${compact ? "post-byline--compact" : ""}`.trim()}>
+  const profileContent = (
+    <>
       <Avatar src={post.avatar} name={post.author} />
       <div className="post-byline__identity">
         <div className="post-byline__name-line">
@@ -870,6 +871,21 @@ function PostByline({
           <UserLevelBadge level={post.level} />
         </div>
       </div>
+    </>
+  );
+  return (
+    <div className={`post-byline ${compact ? "post-byline--compact" : ""}`.trim()}>
+      {post.authorId ? (
+        <a
+          className="post-byline__user"
+          href={userProfileUrl(post.authorId)}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`打开 ${post.author} 的个人主页`}
+        >
+          {profileContent}
+        </a>
+      ) : profileContent}
       <button
         className={`post-byline__follow ${post.isFollowing ? "is-following" : ""}`.trim()}
         type="button"
@@ -983,10 +999,26 @@ function CommentEntry({
   const repliesId = `comment-replies-${comment.id.replace(/[^a-z0-9_-]/gi, "-")}`;
   return (
     <article className={`comment-entry ${nested ? "comment-entry--reply" : ""}`.trim()}>
-      <Avatar src={comment.avatar} name={comment.author} className="comment-entry__avatar" />
+      {comment.authorId ? (
+        <a
+          className="comment-entry__avatar-link"
+          href={userProfileUrl(comment.authorId)}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`打开 ${comment.author} 的个人主页`}
+        >
+          <Avatar src={comment.avatar} name={comment.author} className="comment-entry__avatar" />
+        </a>
+      ) : <Avatar src={comment.avatar} name={comment.author} className="comment-entry__avatar" />}
       <div className="comment-entry__body">
         <header>
-          <strong>{comment.author}</strong>
+          <strong>
+            {comment.authorId ? (
+              <a href={userProfileUrl(comment.authorId)} target="_blank" rel="noreferrer">
+                {comment.author}
+              </a>
+            ) : comment.author}
+          </strong>
           <UserLevelBadge level={comment.level} compact />
         </header>
         {(comment.text || (nested && comment.replyToAuthor && comment.replyToCommentId !== rootCommentId)) && (
@@ -2407,7 +2439,7 @@ export function DetailViews({
 
     window.addEventListener("keydown", handleKeyDown);
     const focusFrame = window.requestAnimationFrame(() => {
-      if (!layer?.contains(document.activeElement)) focusableElements()[0]?.focus();
+      if (!layer?.contains(document.activeElement)) focusableElements()[0]?.focus({ preventScroll: true });
     });
     return () => {
       window.cancelAnimationFrame(focusFrame);

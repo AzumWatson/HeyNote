@@ -8,18 +8,21 @@ import {
   type CSSProperties,
   type MouseEvent as ReactMouseEvent
 } from "react";
-import type { CommentItem, Community, FavoriteFolder, FeedPost, FeedResult, ImageMedia, PostDetail, PostKind, SearchFilterOption, SearchFilterSelection, SearchFilters, SearchResult, SearchSuggestion, SearchType, SearchUser } from "./types";
+import type { CommentItem, Community, FavoriteFolder, FeedPost, FeedResult, ImageMedia, PostDetail, PostKind, SearchFilterOption, SearchFilterSelection, SearchFilters, SearchResult, SearchSuggestion, SearchType, SearchUser, UserProfile } from "./types";
 import {
   fetchCommentReplies,
   fetchFavoriteFolders,
   fetchFeedCommunities,
   fetchFeedPage,
+  fetchCurrentUser,
+  fetchProfileEvents,
   fetchSearchFound,
   fetchSearchPage,
   fetchSearchSuggestions,
   fetchSearchWelcomePage,
   fetchMoreComments,
   fetchPostDetail,
+  fetchUserProfile,
   setCommentLiked,
   setPostAuthorFollowing,
   setSearchUserFollowing,
@@ -33,6 +36,7 @@ import { formatCount } from "./format";
 import { ImageContextMenu, type ImageContextMenuState } from "./components/ImageContextMenu";
 import { HeyboxLogo } from "./components/HeyboxLogo";
 import { copyImageAction, downloadImageAction, type ImageActionTarget } from "./image-actions";
+import { APP_HOME_PATH, userProfileHash, userProfilePath, userProfileUrl } from "./profile-url";
 import {
   isThemePreference,
   persistLocalThemePreference,
@@ -59,9 +63,10 @@ import {
   VideoIcon
 } from "./icons";
 
-type ViewMode = "discover" | "hot" | "saved";
+type ViewMode = "discover" | "hot" | "saved" | "profile";
 
 const ALL_POST_KINDS: PostKind[] = ["image", "video", "article"];
+const HOME_DOCUMENT_TITLE = "小黑盒 - 玩家高能聚集地";
 const KIND_FILTER_OPTIONS: Array<{ key: PostKind; label: string; icon: typeof ImageIcon }> = [
   { key: "image", label: "图文", icon: ImageIcon },
   { key: "video", label: "视频", icon: VideoIcon },
@@ -486,6 +491,20 @@ function PostCard({ post, coverRatio, eager, revealDelay, likeLoading, onLike, o
   onOpen: () => void;
 }) {
   const cover = mediaCover(post);
+  const authorContent = (
+    <>
+      {post.avatar ? (
+        <img
+          src={post.avatar}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          referrerPolicy="no-referrer"
+        />
+      ) : <span className="author__fallback">盒</span>}
+      <span className="author__name">{post.author}</span>
+    </>
+  );
 
   return (
     <article
@@ -494,11 +513,16 @@ function PostCard({ post, coverRatio, eager, revealDelay, likeLoading, onLike, o
         "--feed-reveal-delay": `${revealDelay}ms`
       } as CSSProperties}
       tabIndex={0}
-      onClick={onOpen}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onOpen();
+      }}
       onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
+          event.stopPropagation();
           onOpen();
         }
       }}
@@ -527,18 +551,18 @@ function PostCard({ post, coverRatio, eager, revealDelay, likeLoading, onLike, o
         <h3><HeyboxText value={post.title} emojiSize={18} preserveLineBreaks={false} /></h3>
         {post.kind === "article" && post.excerpt && <p><HeyboxText value={post.excerpt} emojiSize={16} /></p>}
         <div className="feed-card__meta">
-          <div className="author">
-            {post.avatar ? (
-              <img
-                src={post.avatar}
-                alt=""
-                loading="lazy"
-                decoding="async"
-                referrerPolicy="no-referrer"
-              />
-            ) : <span className="author__fallback">盒</span>}
-            <span className="author__name">{post.author}</span>
-          </div>
+          {post.authorId ? (
+            <a
+              className="author feed-card__author-link"
+              href={userProfileUrl(post.authorId)}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(event) => event.stopPropagation()}
+              aria-label={`打开 ${post.author} 的个人主页`}
+            >
+              {authorContent}
+            </a>
+          ) : <div className="author">{authorContent}</div>}
           <div className="card-actions">
             <button
               className={post.isLiked ? "is-active" : ""}
@@ -703,14 +727,26 @@ function SearchUserCard({
   onToggleFollow: () => void;
 }) {
   const visibleMedals = user.medals.slice(0, 3);
+  const profileHref = userProfileUrl(user.id);
   return (
     <article className={`search-user-card${reveal ? " search-user-card--reveal" : ""}`}>
-      <div className="search-user-card__avatar">
+      <a
+        className="search-user-card__avatar search-user-card__profile-link"
+        href={profileHref}
+        target="_blank"
+        rel="noreferrer"
+        aria-label={`打开 ${user.username} 的个人主页`}
+      >
         {user.avatar ? (
           <img src={user.avatar} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" />
         ) : <span>盒</span>}
-      </div>
-      <div className="search-user-card__body">
+      </a>
+      <a
+        className="search-user-card__body search-user-card__profile-link"
+        href={profileHref}
+        target="_blank"
+        rel="noreferrer"
+      >
         <div className="search-user-card__name-row">
           <strong>{user.username}</strong>
           {searchUserLevel(user) && <span className="search-user-card__level">{searchUserLevel(user)}</span>}
@@ -726,7 +762,7 @@ function SearchUserCard({
             ))}
           </div>
         )}
-      </div>
+      </a>
       <div className="search-user-card__aside">
         <span className="search-user-card__id">ID {user.id}</span>
         <button
@@ -896,6 +932,149 @@ function SearchResultPanel({
   );
 }
 
+function ProfilePanel({
+  profile,
+  isCurrentUser,
+  posts,
+  loading,
+  loadingMore,
+  error,
+  masonryColumnCount,
+  coverRatios,
+  revealDelays,
+  likeLoadingIds,
+  onRetry,
+  onLike,
+  onOpen
+}: {
+  profile?: UserProfile;
+  isCurrentUser: boolean;
+  posts: FeedPost[];
+  loading: boolean;
+  loadingMore: boolean;
+  error?: string;
+  masonryColumnCount: number;
+  coverRatios: Map<string, number>;
+  revealDelays: Map<string, number>;
+  likeLoadingIds: Set<string>;
+  onRetry: () => void;
+  onLike: (post: FeedPost) => void;
+  onOpen: (post: FeedPost) => void;
+}) {
+  const masonryColumns = useMemo(
+    () => distributeFeedPosts(posts, masonryColumnCount, coverRatios),
+    [coverRatios, masonryColumnCount, posts]
+  );
+  const statItems = profile ? [
+    { label: "关注", value: profile.stats.following },
+    { label: "粉丝", value: profile.stats.followers },
+    { label: "获赞与收藏", value: profile.stats.likesAndFavorites },
+    ...(isCurrentUser ? [
+      { label: "收藏", value: profile.stats.favorites },
+      { label: "历史记录", value: profile.stats.history }
+    ] : [])
+  ] : [];
+
+  return (
+    <section className="profile-page" aria-label={isCurrentUser ? "我的主页" : "个人主页"} aria-busy={loading}>
+      <div className={`profile-hero${isCurrentUser ? "" : " profile-hero--public"}`}>
+        {profile ? (
+          <>
+            <div className="profile-hero__identity">
+              <div className="profile-hero__avatar">
+                {profile.avatar ? (
+                  <img src={profile.avatar} alt="" decoding="async" referrerPolicy="no-referrer" />
+                ) : <span>我</span>}
+              </div>
+              <div className="profile-hero__copy">
+                <div className="profile-hero__name-row">
+                  <h1>{profile.username}</h1>
+                  {profile.level && <span className="user-level-badge user-level-badge--purple">{profile.level}</span>}
+                </div>
+                <p className={profile.signature ? "" : "is-muted"}>
+                  {profile.signature || "还没有设置个性签名"}
+                </p>
+                {profile.ipLocation && <span className="profile-hero__location">{profile.ipLocation}</span>}
+                {profile.medals.length > 0 && (
+                  <div className="profile-hero__medals" aria-label="个人勋章">
+                    {profile.medals.slice(0, 4).map((medal) => (
+                      <span key={`${medal.id ?? medal.name}-${medal.name}`} title={medal.description || medal.name}>
+                        {medal.imageUrl ? <img src={medal.imageUrl} alt="" loading="lazy" referrerPolicy="no-referrer" /> : null}
+                        {medal.name}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="profile-hero__stats" aria-label="个人数据">
+              {statItems.map((item) => (
+                <div className="profile-stat" key={item.label}>
+                  <strong>{formatCount(item.value)}</strong>
+                  <span>{item.label}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="profile-hero__placeholder">
+            <i />
+            <div><i /><i /></div>
+          </div>
+        )}
+      </div>
+
+      <div className="profile-content-bar">
+        <div className="profile-tabs" role="tablist" aria-label="个人内容">
+          <button className="active" type="button" role="tab" aria-selected="true">动态</button>
+        </div>
+        <span className="profile-content-count">{posts.length ? `${posts.length} 条动态` : "动态"}</span>
+      </div>
+
+      {error && (
+        <div className="feed-notice is-error profile-page__notice">
+          <div><strong>个人主页暂时无法加载</strong><span>{error}</span></div>
+          <button type="button" onClick={onRetry}>重试</button>
+        </div>
+      )}
+
+      {loading && !posts.length ? (
+        <FeedSkeleton columns={masonryColumnCount} />
+      ) : posts.length ? (
+        <section
+          className="masonry-feed profile-masonry-feed"
+          aria-live="polite"
+          aria-busy={loadingMore}
+          style={{ gridTemplateColumns: `repeat(${masonryColumnCount}, minmax(0, 1fr))` }}
+        >
+          {masonryColumns.map((columnPosts, columnIndex) => (
+            <div className="masonry-column" key={`profile-column-${columnIndex}`}>
+              {columnPosts.map((post, rowIndex) => (
+                <PostCard
+                  key={post.id}
+                  post={post}
+                  coverRatio={coverRatios.get(post.id)}
+                  eager={rowIndex < 2}
+                  revealDelay={revealDelays.get(post.id)}
+                  likeLoading={likeLoadingIds.has(post.id)}
+                  onLike={() => onLike(post)}
+                  onOpen={() => onOpen(post)}
+                />
+              ))}
+            </div>
+          ))}
+        </section>
+      ) : !loading && !error ? (
+        <section className="profile-empty-state">
+          <span>⌁</span>
+          <h2>还没有动态</h2>
+          <p>发布的内容会显示在这里。</p>
+        </section>
+      ) : null}
+    </section>
+  );
+}
+
 function FeedSkeleton({ columns }: { columns: number }) {
   const skeletonColumns = Array.from({ length: columns }, () => [] as number[]);
   Array.from({ length: 12 }).forEach((_, index) => {
@@ -1033,11 +1212,36 @@ function feedRouteHash(): string {
   return "#/feed";
 }
 
+function parseUserProfileRoute(): string | null {
+  const match = location.hash.match(/^#\/user\/([^/?#]+)/)
+    ?? location.pathname.match(/^\/app\/user\/profile\/([^/?#]+)\/?$/);
+  if (!match) return null;
+  try {
+    const id = decodeURIComponent(match[1]).trim();
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
+function appFeedUrl(): string {
+  return `/app/bbs/home${feedRouteHash()}`;
+}
+
+function isCurrentProfileRoute(userId: string): boolean {
+  return location.pathname === APP_HOME_PATH && location.hash === userProfileHash(userId);
+}
+
+function appPostUrl(postId: string): string {
+  return `/app/bbs/home#/post/${encodeURIComponent(postId)}`;
+}
+
 export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppProps) {
   const isDemo = Boolean(demoPosts);
   const initialSearchRoute = parseSearchRoute();
+  const initialProfileId = parseUserProfileRoute();
   const [posts, setPosts] = useState<FeedPost[]>(demoPosts ?? []);
-  const [view, setView] = useState<ViewMode>("discover");
+  const [view, setView] = useState<ViewMode>(initialProfileId ? "profile" : "discover");
   const [communities, setCommunities] = useState<Community[]>(demoCommunities);
   const [selectedCommunityId, setSelectedCommunityId] = useState<string | null>(null);
   const [selectedKinds, setSelectedKinds] = useState<Set<PostKind>>(() => new Set(ALL_POST_KINDS));
@@ -1057,12 +1261,21 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   const [searchSuggestionLoading, setSearchSuggestionLoading] = useState(false);
   const [searchLandingLoading, setSearchLandingLoading] = useState(false);
   const [searchLandingError, setSearchLandingError] = useState<string>();
+  const [currentUser, setCurrentUser] = useState<UserProfile>();
+  const [profileUser, setProfileUser] = useState<UserProfile>();
+  const [profilePosts, setProfilePosts] = useState<FeedPost[]>([]);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileLoadingMore, setProfileLoadingMore] = useState(false);
+  const [profileError, setProfileError] = useState<string>();
+  const [profileHasMore, setProfileHasMore] = useState(false);
+  const [profileLastValue, setProfileLastValue] = useState("");
+  const [profileRevealDelays, setProfileRevealDelays] = useState<Map<string, number>>(() => new Map());
   const [searchRevealIds, setSearchRevealIds] = useState<Set<string>>(new Set());
   const [searchFollowLoadingIds, setSearchFollowLoadingIds] = useState<Set<string>>(new Set());
   const [searchFocused, setSearchFocused] = useState(false);
   const [communityError, setCommunityError] = useState<string>();
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
-  const [initialLoading, setInitialLoading] = useState(!isDemo);
+  const [initialLoading, setInitialLoading] = useState(!isDemo && !initialProfileId);
   const [loadingMore, setLoadingMore] = useState(false);
   const [feedError, setFeedError] = useState<string>();
   const [hasMore, setHasMore] = useState(!isDemo);
@@ -1091,6 +1304,9 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   const selectedKindsTouched = useRef(false);
   const themePreferenceTouched = useRef(false);
   const feedScrollRef = useRef<HTMLDivElement>(null);
+  const detailScrollTopRef = useRef(0);
+  const detailScrollCapturedRef = useRef(false);
+  const detailOpenRef = useRef(false);
   const searchBoxRef = useRef<HTMLFormElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const communityListRef = useRef<HTMLDivElement>(null);
@@ -1105,16 +1321,26 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   const commentRequestRef = useRef<string | undefined>(undefined);
   const replyRequestKeysRef = useRef<Map<string, string>>(new Map());
   const imageNoticeTimerRef = useRef<number | null>(null);
+  const originalDocumentTitleRef = useRef<string | undefined>(undefined);
   const feedRevealTimerRef = useRef<number | null>(null);
   const searchRevealTimerRef = useRef<number | null>(null);
   const feedCoverRatiosRef = useRef<Map<string, number>>(new Map());
   const searchCoverRatiosRef = useRef<Map<string, number>>(new Map());
+  const profileCoverRatiosRef = useRef<Map<string, number>>(new Map());
   const feedPostIdsRef = useRef<Set<string>>(new Set((demoPosts ?? []).map((post) => post.id)));
+  const profilePostIdsRef = useRef<Set<string>>(new Set());
   const searchGenerationRef = useRef(0);
+  const profileGenerationRef = useRef(0);
+  const profileRequestKeyRef = useRef<string | null>(null);
+  const profilePendingUserIdRef = useRef<string | null>(null);
+  const profileLoaderRef = useRef<(requestedUserId?: string) => Promise<UserProfile | undefined>>(
+    async () => undefined
+  );
   const suggestionGenerationRef = useRef(0);
   const searchLandingRequestedRef = useRef(false);
   const searchUserFollowIdsRef = useRef<Set<string>>(new Set());
   const searchResultIdsRef = useRef<Set<string>>(new Set());
+  const profileRevealTimerRef = useRef<number | null>(null);
   const masonryColumnCountRef = useRef(masonryColumnCount);
   masonryColumnCountRef.current = masonryColumnCount;
   const resolvedTheme = resolveTheme(themePreference, systemDark);
@@ -1156,6 +1382,28 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     }, longestDelay + FEED_REVEAL_DURATION_MS + 40);
   }, []);
 
+  const stageProfileReveal = useCallback((incoming: FeedPost[], replace = false) => {
+    if (profileRevealTimerRef.current !== null) window.clearTimeout(profileRevealTimerRef.current);
+    if (replace) profilePostIdsRef.current.clear();
+    const additions = incoming.filter((post) => {
+      if (profilePostIdsRef.current.has(post.id)) return false;
+      profilePostIdsRef.current.add(post.id);
+      return true;
+    });
+    const revealLimit = Math.max(4, masonryColumnCountRef.current * 2);
+    const delays = new Map(additions.slice(0, revealLimit).map((post, index) => (
+      [post.id, index * FEED_REVEAL_STAGGER_MS]
+    )));
+    setProfileRevealDelays((current) => replace
+      ? delays
+      : new Map([...current, ...delays]));
+    const longestDelay = Math.max(0, (delays.size - 1) * FEED_REVEAL_STAGGER_MS);
+    profileRevealTimerRef.current = window.setTimeout(() => {
+      setProfileRevealDelays(new Map());
+      profileRevealTimerRef.current = null;
+    }, longestDelay + FEED_REVEAL_DURATION_MS + 40);
+  }, []);
+
   const stageSearchReveal = useCallback((result: SearchResult, replace = false) => {
     if (searchRevealTimerRef.current !== null) window.clearTimeout(searchRevealTimerRef.current);
     if (replace) searchResultIdsRef.current.clear();
@@ -1178,6 +1426,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     if (imageNoticeTimerRef.current !== null) window.clearTimeout(imageNoticeTimerRef.current);
     if (feedRevealTimerRef.current !== null) window.clearTimeout(feedRevealTimerRef.current);
     if (searchRevealTimerRef.current !== null) window.clearTimeout(searchRevealTimerRef.current);
+    if (profileRevealTimerRef.current !== null) window.clearTimeout(profileRevealTimerRef.current);
   }, []);
 
   useLayoutEffect(() => {
@@ -1208,6 +1457,19 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     });
     observer.observe(root);
     return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const scroll = feedScrollRef.current;
+    if (!scroll) return;
+    const rememberScroll = () => {
+      if (detailOpenRef.current) return;
+      detailScrollTopRef.current = scroll.scrollTop;
+      detailScrollCapturedRef.current = true;
+    };
+    rememberScroll();
+    scroll.addEventListener("scroll", rememberScroll, { passive: true });
+    return () => scroll.removeEventListener("scroll", rememberScroll);
   }, []);
 
   useEffect(() => {
@@ -1365,6 +1627,37 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   useEffect(() => { void loadCommunities(); }, [loadCommunities]);
 
   useEffect(() => {
+    if (isDemo) {
+      const firstPost = demoPosts?.[0];
+      if (firstPost) {
+        setCurrentUser({
+          id: firstPost.authorId || "demo-user",
+          username: firstPost.author,
+          avatar: firstPost.avatar,
+          level: firstPost.level,
+          medals: [],
+          stats: {
+            following: 0,
+            followers: 0,
+            likesAndFavorites: 0,
+            favorites: 0,
+            history: 0,
+            posts: demoPosts.length
+          }
+        });
+      }
+      return;
+    }
+    let cancelled = false;
+    void fetchCurrentUser().then((user) => {
+      if (!cancelled) setCurrentUser(user);
+    }).catch(() => {
+      if (!cancelled) setCurrentUser(undefined);
+    });
+    return () => { cancelled = true; };
+  }, [demoPosts, isDemo]);
+
+  useEffect(() => {
     if (!filterOpen) return;
     const closeOnPointerDown = (event: PointerEvent) => {
       const filterNode = kindFilterRef.current;
@@ -1422,12 +1715,12 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     setSearchRevealIds(new Set());
     setSearchLoading(false);
     setSearchFocused(false);
-    if (syncUrl && location.hash !== feedRouteHash()) {
+    if (syncUrl && (location.pathname !== "/app/bbs/home" || location.hash !== feedRouteHash())) {
       history.replaceState({
         ...(history.state ?? {}),
         xiaoheishuDetail: false,
         xiaoheishuSearch: false
-      }, "", feedRouteHash());
+      }, "", appFeedUrl());
     }
     feedScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
   }, []);
@@ -1451,12 +1744,12 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     setSearchFilterSelection(EMPTY_SEARCH_FILTER_SELECTION);
     setSearchError(undefined);
     setSearchLoading(false);
-    if (location.hash !== feedRouteHash()) {
+    if (location.pathname !== "/app/bbs/home" || location.hash !== feedRouteHash()) {
       history.replaceState({
         ...(history.state ?? {}),
         xiaoheishuDetail: false,
         xiaoheishuSearch: false
-      }, "", feedRouteHash());
+      }, "", appFeedUrl());
     }
   }, [searchQuery]);
 
@@ -1488,13 +1781,14 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     rememberSearch(query);
     if (syncUrl) {
       const nextHash = searchRouteHash(query, requestedType, selection);
+      const nextUrl = `/app/bbs/home${nextHash}`;
       const nextState = {
         ...(history.state ?? {}),
         xiaoheishuDetail: false,
         xiaoheishuSearch: true
       };
-      if (sameSearch) history.replaceState(nextState, "", nextHash);
-      else history.pushState(nextState, "", nextHash);
+      if (sameSearch) history.replaceState(nextState, "", nextUrl);
+      else history.pushState(nextState, "", nextUrl);
     }
     feedScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
     try {
@@ -1672,13 +1966,232 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     }
   }, [isDemo, selectedCommunityId, stageFeedReveal]);
 
+  const pauseFeedLoading = useCallback(() => {
+    feedGenerationRef.current += 1;
+    loadingRef.current = false;
+    loadingGenerationRef.current = null;
+    requestedOffsetsRef.current.clear();
+    setInitialLoading(false);
+    setLoadingMore(false);
+  }, []);
+
+  const loadProfile = useCallback(async (requestedUserId = ""): Promise<UserProfile | undefined> => {
+    const normalizedUserId = requestedUserId.trim();
+    if (profileRequestKeyRef.current) {
+      profilePendingUserIdRef.current = normalizedUserId;
+      profileGenerationRef.current += 1;
+      profileCoverRatiosRef.current.clear();
+      profilePostIdsRef.current.clear();
+      setProfileUser(undefined);
+      setProfilePosts([]);
+      setProfileError(undefined);
+      setProfileHasMore(false);
+      setProfileLastValue("");
+      setProfileLoading(true);
+      setProfileLoadingMore(false);
+      return undefined;
+    }
+    const generation = profileGenerationRef.current + 1;
+    const requestKey = `initial:${generation}`;
+    profileGenerationRef.current = generation;
+    profileRequestKeyRef.current = requestKey;
+    profilePendingUserIdRef.current = null;
+    profileCoverRatiosRef.current.clear();
+    profilePostIdsRef.current.clear();
+    setProfileUser(undefined);
+    setProfilePosts([]);
+    setProfileError(undefined);
+    setProfileHasMore(false);
+    setProfileLastValue("");
+    setProfileLoading(true);
+    setProfileLoadingMore(false);
+    feedScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+
+    try {
+      if (isDemo) {
+        const fallbackUser = currentUser;
+        const demoPage = demoPosts ?? [];
+        const coverRatios = await preloadFeedCoverRatios(
+          demoPage,
+          () => profileGenerationRef.current === generation
+        );
+        if (profileGenerationRef.current !== generation) return;
+        coverRatios.forEach((ratio, postId) => profileCoverRatiosRef.current.set(postId, ratio));
+        stageProfileReveal(demoPage, true);
+        setProfileUser(fallbackUser);
+        setProfilePosts(demoPage);
+        return fallbackUser;
+      }
+
+      const account = currentUser ?? await fetchCurrentUser();
+      if (profileGenerationRef.current !== generation) return;
+      setCurrentUser(account);
+      const userId = normalizedUserId || account.id;
+      const profile = await fetchUserProfile(userId);
+      if (profileGenerationRef.current !== generation) return;
+      const events = await fetchProfileEvents(userId, currentSearchWidth(), "");
+      if (profileGenerationRef.current !== generation) return;
+      const coverRatios = await preloadFeedCoverRatios(
+        events.posts,
+        () => profileGenerationRef.current === generation
+      );
+      if (profileGenerationRef.current !== generation) return;
+      coverRatios.forEach((ratio, postId) => profileCoverRatiosRef.current.set(postId, ratio));
+      stageProfileReveal(events.posts, true);
+      setProfileUser(profile);
+      setProfilePosts(events.posts);
+      setProfileHasMore(events.hasMore);
+      setProfileLastValue(events.nextLastValue);
+      return profile;
+    } catch (error) {
+      if (profileGenerationRef.current !== generation) return;
+      setProfileError(error instanceof Error ? error.message : "个人主页加载失败");
+    } finally {
+      if (profileRequestKeyRef.current === requestKey) {
+        profileRequestKeyRef.current = null;
+        const pendingUserId = profilePendingUserIdRef.current;
+        profilePendingUserIdRef.current = null;
+        const activeProfileId = parseUserProfileRoute();
+        const shouldLoadPending = pendingUserId !== null
+          && Boolean(activeProfileId)
+          && (pendingUserId === "" || activeProfileId === pendingUserId);
+        if (shouldLoadPending) {
+          window.setTimeout(() => {
+            const currentProfileId = parseUserProfileRoute();
+            if (
+              !profileRequestKeyRef.current
+              && currentProfileId
+              && (pendingUserId === "" || currentProfileId === pendingUserId)
+            ) {
+              void profileLoaderRef.current(pendingUserId);
+            }
+          }, 0);
+        } else {
+          setProfileLoading(false);
+          setProfileLoadingMore(false);
+        }
+      }
+    }
+  }, [currentUser, demoPosts, isDemo, stageProfileReveal]);
+
+  profileLoaderRef.current = loadProfile;
+
+  const loadMoreProfile = useCallback(async () => {
+    if (
+      isDemo
+      || profileLoading
+      || profileLoadingMore
+      || !profileHasMore
+      || !profileUser
+      || !profileLastValue
+      || profileRequestKeyRef.current
+    ) return;
+    const generation = profileGenerationRef.current;
+    const requestedLastValue = profileLastValue;
+    const requestKey = `events:${profileUser.id}:${requestedLastValue}`;
+    profileRequestKeyRef.current = requestKey;
+    setProfileLoadingMore(true);
+    try {
+      const next = await fetchProfileEvents(profileUser.id, currentSearchWidth(), requestedLastValue);
+      if (profileGenerationRef.current !== generation) return;
+      const coverRatios = await preloadFeedCoverRatios(
+        next.posts,
+        () => profileGenerationRef.current === generation
+      );
+      if (profileGenerationRef.current !== generation) return;
+      coverRatios.forEach((ratio, postId) => {
+        if (!profileCoverRatiosRef.current.has(postId)) profileCoverRatiosRef.current.set(postId, ratio);
+      });
+      stageProfileReveal(next.posts);
+      setProfilePosts((current) => mergePosts(current, next.posts));
+      const cursorAdvanced = next.nextLastValue && next.nextLastValue !== requestedLastValue;
+      setProfileHasMore(Boolean(cursorAdvanced && next.hasMore));
+      setProfileLastValue(next.nextLastValue);
+      setProfileError(undefined);
+    } catch (error) {
+      if (profileGenerationRef.current === generation) {
+        setProfileError(error instanceof Error ? error.message : "个人动态下一页加载失败");
+      }
+    } finally {
+      if (profileRequestKeyRef.current === requestKey) {
+        profileRequestKeyRef.current = null;
+        const pendingUserId = profilePendingUserIdRef.current;
+        profilePendingUserIdRef.current = null;
+        const activeProfileId = parseUserProfileRoute();
+        const shouldLoadPending = pendingUserId !== null
+          && Boolean(activeProfileId)
+          && (pendingUserId === "" || activeProfileId === pendingUserId);
+        if (shouldLoadPending) {
+          window.setTimeout(() => {
+            const currentProfileId = parseUserProfileRoute();
+            if (
+              !profileRequestKeyRef.current
+              && currentProfileId
+              && (pendingUserId === "" || currentProfileId === pendingUserId)
+            ) {
+              void profileLoaderRef.current(pendingUserId);
+            }
+          }, 0);
+        } else {
+          setProfileLoading(false);
+          setProfileLoadingMore(false);
+        }
+      }
+    }
+  }, [isDemo, profileHasMore, profileLastValue, profileLoading, profileLoadingMore, profileUser, stageProfileReveal]);
+
   const refreshDiscover = useCallback(() => {
-    clearSearch();
+    clearSearch(false);
+    profilePendingUserIdRef.current = null;
+    profileGenerationRef.current += 1;
+    setProfileLoading(false);
+    setProfileLoadingMore(false);
     setView("discover");
+    if (location.pathname !== "/app/bbs/home" || location.hash !== feedRouteHash()) {
+      history.pushState({
+        ...(history.state ?? {}),
+        xiaoheishuDetail: false,
+        xiaoheishuSearch: false,
+        xiaoheishuProfile: false
+      }, "", appFeedUrl());
+    }
     void loadInitial();
   }, [clearSearch, loadInitial]);
 
-  useEffect(() => { void loadInitial(); }, [loadInitial]);
+  const openProfile = useCallback(() => {
+    clearSearch(false);
+    pauseFeedLoading();
+    setView("profile");
+    const currentId = currentUser?.id;
+    if (currentId && !isCurrentProfileRoute(currentId)) {
+      history.pushState({
+        ...(history.state ?? {}),
+        xiaoheishuDetail: false,
+        xiaoheishuSearch: false,
+        xiaoheishuProfile: true
+      }, "", userProfilePath(currentId));
+    }
+    void loadProfile(currentId).then((profile) => {
+      if (!profile || currentId || isCurrentProfileRoute(profile.id)) return;
+      history.pushState({
+        ...(history.state ?? {}),
+        xiaoheishuDetail: false,
+        xiaoheishuSearch: false,
+        xiaoheishuProfile: true
+      }, "", userProfilePath(profile.id));
+    });
+  }, [clearSearch, currentUser?.id, loadProfile, pauseFeedLoading]);
+
+  useEffect(() => {
+    if (!initialProfileId) void loadInitial();
+  }, [initialProfileId, loadInitial]);
+
+  const initialProfileLoadRef = useRef(false);
+  useEffect(() => {
+    if (!initialProfileId || initialProfileLoadRef.current) return;
+    initialProfileLoadRef.current = true;
+    void loadProfile(initialProfileId);
+  }, [initialProfileId, loadProfile]);
 
   const loadMore = useCallback(async () => {
     if (isDemo || initialLoading || loadingRef.current || !hasMore || selectedKinds.size === 0) return;
@@ -1739,7 +2252,8 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     const root = feedScrollRef.current;
     if (!target || !root || isDemo) return;
     const loadNext = () => {
-      if (searchQuery) void loadMoreSearch();
+      if (view === "profile") void loadMoreProfile();
+      else if (searchQuery) void loadMoreSearch();
       else void loadMore();
     };
     const observer = new IntersectionObserver((entries) => {
@@ -1772,7 +2286,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       resizeObserver?.disconnect();
       observer.disconnect();
     };
-  }, [isDemo, loadMore, loadMoreSearch, searchQuery]);
+  }, [isDemo, loadMore, loadMoreProfile, loadMoreSearch, searchQuery, view]);
 
   useEffect(() => {
     if (view !== "hot") return;
@@ -1886,6 +2400,13 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   }
 
   const loadDetail = useCallback(async (post: FeedPost, navigate = true) => {
+    if (!detailOpenRef.current) {
+      if (!detailScrollCapturedRef.current) {
+        detailScrollTopRef.current = feedScrollRef.current?.scrollTop ?? 0;
+      }
+      detailOpenRef.current = true;
+    }
+    detailScrollCapturedRef.current = false;
     selectedIdRef.current = post.id;
     setSelectedPost(post);
     setDetail(undefined);
@@ -1900,7 +2421,8 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     replyRequestKeysRef.current.clear();
     setLoadingMoreComments(false);
     setLoadingReplyIds(new Set());
-    if (navigate) history.pushState({ xiaoheishuDetail: true }, "", `#/post/${encodeURIComponent(post.id)}`);
+    const detailUrl = appPostUrl(post.id);
+    if (navigate) history.pushState({ xiaoheishuDetail: true }, "", detailUrl);
 
     try {
       const nextDetail = isDemo ? demoDetails[post.id] : await fetchPostDetail(post.id, post);
@@ -1914,7 +2436,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       history.replaceState({
         ...(history.state ?? {}),
         xiaoheishuDetail: navigate || history.state?.xiaoheishuDetail === true
-      }, "", `#/post/${encodeURIComponent(post.id)}`);
+      }, "", detailUrl);
     } catch (error) {
       if (selectedIdRef.current === post.id) {
         setDetailError(error instanceof Error ? error.message : "帖子详情加载失败");
@@ -1927,6 +2449,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
   useEffect(() => {
     if (!location.hash) history.replaceState(history.state, "", "#/feed");
     const resetDetailState = () => {
+      detailOpenRef.current = false;
       selectedIdRef.current = undefined;
       setSelectedPost(undefined);
       setDetail(undefined);
@@ -1940,21 +2463,44 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
       setLoadingReplyIds(new Set());
     };
     const onPopState = () => {
+      const profileId = parseUserProfileRoute();
       const searchRoute = parseSearchRoute();
       if (searchRoute) {
         resetDetailState();
+        setView("discover");
         const sameSearch = searchRoute.query === searchQuery
           && searchRoute.searchType === searchType
           && searchRoute.selection.filter === searchFilterSelection.filter
           && searchRoute.selection.sort === searchFilterSelection.sort
           && searchRoute.selection.timeRange === searchFilterSelection.timeRange;
         if (!sameSearch) void runSearch(searchRoute.query, searchRoute.searchType, searchRoute.selection, false);
+        window.requestAnimationFrame(() => {
+          feedScrollRef.current?.scrollTo({ top: detailScrollTopRef.current, behavior: "auto" });
+        });
         return;
       }
       const route = parseHashRoute();
+      if (profileId && !route) {
+        resetDetailState();
+        pauseFeedLoading();
+        setView("profile");
+        if (searchQuery) clearSearch(false);
+        if (profileUser?.id !== profileId) {
+          void loadProfile(profileId);
+        } else {
+          window.requestAnimationFrame(() => {
+            feedScrollRef.current?.scrollTo({ top: detailScrollTopRef.current, behavior: "auto" });
+          });
+        }
+        return;
+      }
       if (!route) {
         resetDetailState();
+        setView("discover");
         if (searchQuery) clearSearch(false);
+        window.requestAnimationFrame(() => {
+          feedScrollRef.current?.scrollTo({ top: detailScrollTopRef.current, behavior: "auto" });
+        });
         return;
       }
       if (route.id === selectedIdRef.current) return;
@@ -1963,7 +2509,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [clearSearch, loadDetail, posts, runSearch, searchFilterSelection, searchQuery, searchType]);
+  }, [clearSearch, loadDetail, loadProfile, pauseFeedLoading, posts, profileUser?.id, runSearch, searchFilterSelection, searchQuery, searchType]);
 
   useEffect(() => {
     const route = parseHashRoute();
@@ -1972,7 +2518,41 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     void loadDetail(post, false);
   }, [loadDetail, posts]);
 
+  useEffect(() => {
+    originalDocumentTitleRef.current = document.title;
+    return () => {
+      if (originalDocumentTitleRef.current !== undefined) {
+        document.title = originalDocumentTitleRef.current;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedPost) return;
+    const restore = () => {
+      feedScrollRef.current?.scrollTo({ top: detailScrollTopRef.current, behavior: "auto" });
+    };
+    const firstFrame = window.requestAnimationFrame(() => {
+      restore();
+      window.requestAnimationFrame(restore);
+    });
+    return () => window.cancelAnimationFrame(firstFrame);
+  }, [selectedPost]);
+
+  useEffect(() => {
+    const postTitle = (detail?.post.title || selectedPost?.title || "").trim();
+    const pageTitle = postTitle
+      ? `${postTitle} - 小黑盒`
+      : searchQuery
+        ? `${searchQuery} - 小黑盒搜索`
+        : view === "profile" && profileUser
+          ? `${profileUser.username}的个人主页 - 小黑盒`
+          : HOME_DOCUMENT_TITLE;
+    document.title = pageTitle;
+  }, [detail, profileUser, searchQuery, selectedPost, view]);
+
   function closeDetail() {
+    detailOpenRef.current = false;
     selectedIdRef.current = undefined;
     setSelectedPost(undefined);
     setDetail(undefined);
@@ -2020,6 +2600,11 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
           ? { ...post, isFollowing: nextFollowing }
           : post
       )));
+      setProfilePosts((current) => current.map((post) => (
+        post.id === linkId || Boolean(followingId && post.authorId === followingId)
+          ? { ...post, isFollowing: nextFollowing }
+          : post
+      )));
       showImageActionNotice(nextFollowing ? `已关注 ${detail.post.author}` : `已取消关注 ${detail.post.author}`);
     } catch (error) {
       if (selectedIdRef.current === linkId) {
@@ -2041,6 +2626,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
         ? { ...current, users: current.users.map((item) => item.id === userId ? { ...item, isFollowing: following } : item) }
         : current);
       setPosts((current) => current.map((post) => post.authorId === userId ? { ...post, isFollowing: following } : post));
+      setProfilePosts((current) => current.map((post) => post.authorId === userId ? { ...post, isFollowing: following } : post));
       setDetail((current) => current?.post.authorId === userId ? { ...current, post: { ...current.post, isFollowing: following } } : current);
       setSelectedPost((current) => current?.authorId === userId ? { ...current, isFollowing: following } : current);
     };
@@ -2066,6 +2652,7 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     setDetail((current) => current?.post.id === linkId ? { ...current, post: updater(current.post) } : current);
     setSelectedPost((current) => current?.id === linkId ? updater(current) : current);
     setPosts((current) => current.map((post) => post.id === linkId ? updater(post) : post));
+    setProfilePosts((current) => current.map((post) => post.id === linkId ? updater(post) : post));
     setSearchResult((current) => current
       ? { ...current, posts: current.posts.map((post) => post.id === linkId ? updater(post) : post) }
       : current);
@@ -2292,6 +2879,10 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
     }
   }
 
+  const isOwnProfile = view === "profile"
+    && Boolean(profileUser && currentUser && profileUser.id === currentUser.id);
+  const activeProfileId = parseUserProfileRoute() ?? profileUser?.id ?? currentUser?.id ?? "";
+
   return (
     <div className="xhs-root" data-theme={resolvedTheme} data-theme-preference={themePreference}>
       <div className="app-shell">
@@ -2300,10 +2891,23 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
 
           <nav className="side-nav" aria-label="信息流导航">
             <button
-              className="active"
-              aria-current="page"
+              className={view === "discover" && !searchQuery ? "active" : ""}
+              aria-current={view === "discover" && !searchQuery ? "page" : undefined}
               onClick={refreshDiscover}
             ><CompassIcon /><span>发现</span></button>
+            <button
+              className={`sidebar-profile${isOwnProfile ? " active" : ""}`}
+              type="button"
+              aria-current={isOwnProfile ? "page" : undefined}
+              onClick={openProfile}
+            >
+              <span className="sidebar-profile__avatar">
+                {currentUser?.avatar ? (
+                  <img src={currentUser.avatar} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                ) : <span>我</span>}
+              </span>
+              <span>我</span>
+            </button>
           </nav>
 
           <div className="sidebar__bottom">
@@ -2434,7 +3038,19 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
             </div>
           </header>
 
-          <div className="feed-scroll" ref={feedScrollRef}>
+          <div
+            className="feed-scroll"
+            ref={feedScrollRef}
+            onScroll={() => {
+              if (selectedPost) return;
+              detailScrollTopRef.current = feedScrollRef.current?.scrollTop ?? 0;
+              detailScrollCapturedRef.current = true;
+            }}
+            onPointerDownCapture={() => {
+              detailScrollTopRef.current = feedScrollRef.current?.scrollTop ?? 0;
+              detailScrollCapturedRef.current = true;
+            }}
+          >
             {searchQuery ? (
               <SearchResultPanel
                 result={searchResult}
@@ -2456,6 +3072,22 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
                 onSelectAllKinds={selectAllKinds}
                 onToggleUserFollow={(user) => void toggleSearchUserFollow(user)}
                 onRetry={() => void runSearch(searchQuery, searchType)}
+                onLike={(post) => void togglePostLike(post)}
+                onOpen={(post) => void loadDetail(post)}
+              />
+            ) : view === "profile" ? (
+              <ProfilePanel
+                profile={profileUser}
+                isCurrentUser={isOwnProfile}
+                posts={profilePosts}
+                loading={profileLoading}
+                loadingMore={profileLoadingMore}
+                error={profileError}
+                masonryColumnCount={masonryColumnCount}
+                coverRatios={profileCoverRatiosRef.current}
+                revealDelays={profileRevealDelays}
+                likeLoadingIds={likingPostIds}
+                onRetry={() => void loadProfile(activeProfileId)}
                 onLike={(post) => void togglePostLike(post)}
                 onOpen={(post) => void loadDetail(post)}
               />
@@ -2579,12 +3211,16 @@ export function App({ demoPosts, demoDetails = {}, demoCommunities = [] }: AppPr
             </>}
 
             <div className="feed-sentinel" ref={sentinelRef}>
-              {searchQuery
-                ? searchLoading && searchResult && <><i /><span>正在加载下一页</span></>
-                : loadingMore && <><i /><span>正在加载下一页</span></>}
-              {searchQuery
-                ? searchResult && !searchResult.hasMore && <span>已经看到这一批内容的末尾</span>
-                : !hasMore && posts.length > 0 && <span>已经看到这一批内容的末尾</span>}
+              {view === "profile"
+                ? profileLoadingMore && <><i /><span>正在加载下一页</span></>
+                : searchQuery
+                  ? searchLoading && searchResult && <><i /><span>正在加载下一页</span></>
+                  : loadingMore && <><i /><span>正在加载下一页</span></>}
+              {view === "profile"
+                ? !profileHasMore && profilePosts.length > 0 && <span>已经看到这一批内容的末尾</span>
+                : searchQuery
+                  ? searchResult && !searchResult.hasMore && <span>已经看到这一批内容的末尾</span>
+                  : !hasMore && posts.length > 0 && <span>已经看到这一批内容的末尾</span>}
             </div>
           </div>
 

@@ -12,14 +12,18 @@ interface InternalResponse {
 }
 
 const HOME_PATH = "/app/bbs/home";
+const USER_PROFILE_PATH_PREFIX = "/app/user/profile/";
 const OVERLAY_ID = "xiaoheishu-overlay";
 const ISOLATION_STYLE_ID = "xiaoheishu-page-isolation";
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 
-function isHomeRoute(): boolean {
+function isSupportedRoute(): boolean {
   return location.protocol === "https:"
     && location.hostname === "www.xiaoheihe.cn"
-    && location.pathname === HOME_PATH;
+    && (
+      location.pathname === HOME_PATH
+      || new RegExp(`^${USER_PROFILE_PATH_PREFIX.replaceAll("/", "\\/")}[^/]+\\/?$`).test(location.pathname)
+    );
 }
 
 async function requestModeSwitch(mode: BrowseMode): Promise<void> {
@@ -29,7 +33,6 @@ async function requestModeSwitch(mode: BrowseMode): Promise<void> {
     mode
   }) as InternalResponse;
   if (!response?.ok) throw new Error(response?.error || "浏览模式切换失败");
-  history.replaceState(history.state, "", HOME_PATH);
   location.reload();
 }
 
@@ -55,12 +58,12 @@ class OverlayErrorBoundary extends Component<BoundaryProps, { failed: boolean }>
 }
 
 function mount(): void {
-  if (!isHomeRoute() || document.getElementById(OVERLAY_ID)) return;
+  if (!isSupportedRoute() || document.getElementById(OVERLAY_ID)) return;
   if (document.documentElement.dataset.xiaoheishuMounting === "true") return;
   document.documentElement.dataset.xiaoheishuMounting = "true";
 
   const attach = () => {
-    if (!isHomeRoute() || !document.body || document.getElementById(OVERLAY_ID)) return;
+    if (!isSupportedRoute() || !document.body || document.getElementById(OVERLAY_ID)) return;
 
     const initialTheme = resolveTheme(readLocalThemePreference(), prefersDarkColorScheme());
     const initialCanvas = initialTheme === "dark" ? "#111210" : "#f7f7f5";
@@ -136,7 +139,6 @@ function mount(): void {
           operation: "switch-mode",
           mode: "original"
         }).then(() => {
-          history.replaceState(history.state, "", HOME_PATH);
           location.reload();
         }).catch(() => undefined);
         console.error("[HeyNote] React 覆盖层渲染失败，已恢复原版论坛", error);
@@ -144,10 +146,10 @@ function mount(): void {
     };
 
     try {
-      const hash = /^#\/(?:feed(?:[/?]|$)|search(?:[/?]|$)|(?:post|article)\/[^/?#]+(?:[/?]|$))/.test(location.hash)
+      const hash = /^#\/(?:feed(?:[/?]|$)|search(?:[/?]|$)|user\/[^/?#]+(?:[/?]|$)|(?:post|article)\/[^/?#]+(?:[/?]|$))/.test(location.hash)
         ? location.hash
         : "#/feed";
-      history.replaceState(history.state, "", `${HOME_PATH}${hash}`);
+      history.replaceState(history.state, "", `${location.pathname}${hash}`);
       root = createRoot(rootElement);
       root.render(
         <OverlayErrorBoundary onFailure={failOpen}>

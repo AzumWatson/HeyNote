@@ -3,7 +3,7 @@
   "minimum_chrome_version": "102",
   "name": "HeyNote 小黑书",
   "short_name": "HeyNote",
-  "version": "0.7.34",
+  "version": "0.8.0",
   "description": "在小黑盒论坛首页一键切换原版与 HeyNote 小黑书瀑布流。",
   "permissions": ["storage", "scripting", "downloads", "clipboardWrite"],
   "host_permissions": [
@@ -18,7 +18,10 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.xiaoheihe.cn/app/bbs/home*"],
+      "matches": [
+        "https://www.xiaoheihe.cn/app/bbs/home*",
+        "https://www.xiaoheihe.cn/app/user/profile/*"
+      ],
       "js": ["domain-claim.js"],
       "run_at": "document_start"
     }

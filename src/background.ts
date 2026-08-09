@@ -2,7 +2,7 @@ type JsonScalar = string | number | boolean | null;
 
 interface HeyboxApiMessage {
   channel: "xiaoheishu-api";
-  operation: "feed" | "feedBanner" | "communityFeed" | "search" | "searchWelcome" | "searchFound" | "searchSuggestion" | "detail" | "comments" | "commentReplies" | "originalImage" | "favoriteFolders" | "likePost" | "favoritePost" | "likeComment" | "followUser" | "unfollowUser" | "followSearchUser" | "unfollowSearchUser";
+  operation: "feed" | "feedBanner" | "communityFeed" | "search" | "searchWelcome" | "searchFound" | "searchSuggestion" | "currentUser" | "userProfile" | "profileEvents" | "detail" | "comments" | "commentReplies" | "originalImage" | "favoriteFolders" | "likePost" | "favoritePost" | "likeComment" | "followUser" | "unfollowUser" | "followSearchUser" | "unfollowSearchUser";
   params?: Record<string, JsonScalar>;
 }
 
@@ -41,6 +41,7 @@ type InjectedResponse =
 const MODE_KEY = "xiaoheishu:browse-mode";
 const VERSION_KEY = "xiaoheishu:loaded-version";
 const HOME_PATH = "/app/bbs/home";
+const USER_PROFILE_PATH_PREFIX = "/app/user/profile/";
 const HOME_URL = `https://www.xiaoheihe.cn${HOME_PATH}`;
 const HOME_MATCH = `${HOME_URL}*`;
 
@@ -52,6 +53,9 @@ const OPERATION_PATHS: Record<HeyboxApiMessage["operation"], string> = {
   searchWelcome: "/bbs/app/api/search/welcome_page/v2",
   searchFound: "/bbs/app/api/search/found",
   searchSuggestion: "/bbs/app/api/search/suggestion/v2",
+  currentUser: "/account/restore_login",
+  userProfile: "/bbs/app/profile/user/profile",
+  profileEvents: "/bbs/app/profile/events",
   detail: "/bbs/app/link/tree",
   comments: "/bbs/app/link/tree",
   commentReplies: "/bbs/app/comment/sub/comments",
@@ -96,6 +100,21 @@ function isHeyboxForumUrl(url: string | undefined): boolean {
 }
 
 function isHomePageUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:"
+      && parsed.hostname === "www.xiaoheihe.cn"
+      && (
+        parsed.pathname === HOME_PATH
+        || new RegExp(`^${USER_PROFILE_PATH_PREFIX.replaceAll("/", "\\/")}[^/]+\\/?$`).test(parsed.pathname)
+      );
+  } catch {
+    return false;
+  }
+}
+
+function isExactHomePageUrl(url: string | undefined): boolean {
   if (!url) return false;
   try {
     const parsed = new URL(url);
@@ -258,7 +277,7 @@ async function focusOrOpenHome(preferredTab?: chrome.tabs.Tab): Promise<void> {
   await setBrowseMode("xiaoheishu");
 
   if (typeof preferredTab?.id === "number" && isHeyboxForumUrl(preferredTab.url)) {
-    if (isHomePageUrl(preferredTab.url)) {
+    if (isExactHomePageUrl(preferredTab.url)) {
       await chrome.tabs.reload(preferredTab.id);
     } else {
       await chrome.tabs.update(preferredTab.id, { url: HOME_URL, active: true });
@@ -503,6 +522,27 @@ function queryParamsFor(
       throw new Error("API 参数 query 不能为空或格式不正确");
     }
     return { q: query };
+  }
+
+  if (operation === "currentUser") {
+    requireExactKeys(params, []);
+    return {};
+  }
+
+  if (operation === "userProfile") {
+    requireExactKeys(params, ["userId"]);
+    return { userid: commentIdValue(params.userId, "userId") };
+  }
+
+  if (operation === "profileEvents") {
+    requireExactKeys(params, ["userId", "width", "lastValue"]);
+    const width = finiteNumber(params.width, "width");
+    return {
+      list_type: "moment",
+      userid: commentIdValue(params.userId, "userId"),
+      dw: Math.min(3_840, Math.max(320, Math.round(width))),
+      lastval: paginationValue(params.lastValue, "lastValue")
+    };
   }
 
   if (operation === "detail") {
@@ -999,6 +1039,9 @@ async function handleApiMessage(
     && operation !== "searchWelcome"
     && operation !== "searchFound"
     && operation !== "searchSuggestion"
+    && operation !== "currentUser"
+    && operation !== "userProfile"
+    && operation !== "profileEvents"
     && operation !== "detail"
     && operation !== "comments"
     && operation !== "commentReplies"
@@ -1025,7 +1068,7 @@ async function handleApiMessage(
   try {
     const sourceTab = await chrome.tabs.get(tabId);
     if (!isHomePageUrl(sourceTab.url)) {
-      throw new Error("发起请求的页面不是小黑盒论坛首页");
+      throw new Error("发起请求的页面不是小黑盒支持的页面");
     }
   } catch (error) {
     return { ok: false, error: errorText(error) };

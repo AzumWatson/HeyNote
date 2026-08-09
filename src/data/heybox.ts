@@ -15,6 +15,7 @@ import type {
   PostContentTag,
   PostKind,
   PostMedia,
+  ProfilePageResult,
   SearchFilterOption,
   SearchFilterSelection,
   SearchFilters,
@@ -23,6 +24,8 @@ import type {
   SearchSuggestion,
   SearchType,
   SearchUser,
+  UserProfile,
+  UserProfileStats,
   VideoMedia
 } from "../types";
 import { heyboxEmojiFromCode, heyboxEmojiFromId } from "./heybox-emoji";
@@ -676,6 +679,7 @@ function mapComment(value: unknown, fallbackId = ""): CommentItem | null {
   return {
     id,
     author: asText(user.username, user.nickname, user.name, item.username) || "盒友",
+    authorId: asText(user.userid, user.user_id, user.heybox_id, user.id, item.userid, item.user_id, item.author_id) || undefined,
     avatar: remoteUrl(user.avatar) || remoteUrl(item.avatar),
     level: levelFrom(user, item),
     text: plainCommentText(content),
@@ -961,6 +965,70 @@ function mapSearchUser(value: unknown): SearchUser | null {
   };
 }
 
+function emptyUserProfileStats(): UserProfileStats {
+  return {
+    following: 0,
+    followers: 0,
+    likesAndFavorites: 0,
+    favorites: 0,
+    history: 0,
+    posts: 0
+  };
+}
+
+function mapUserProfile(value: unknown): UserProfile | null {
+  const info = asRecord(value);
+  const nestedUser = asRecord(info.user ?? info.user_info);
+  const bbsInfo = asRecord(info.bbs_info ?? nestedUser.bbs_info);
+  const id = asText(
+    info.userid,
+    info.user_id,
+    info.heybox_id,
+    nestedUser.userid,
+    nestedUser.user_id,
+    nestedUser.heybox_id
+  );
+  const username = asText(
+    info.username,
+    info.nickname,
+    nestedUser.username,
+    nestedUser.nickname
+  );
+  if (!id || !username) return null;
+
+  const rawMedals = firstNonEmptyArray(info.medals, info.medal, nestedUser.medals, nestedUser.medal);
+  const medals = rawMedals
+    .map(mapSearchMedal)
+    .filter((medal): medal is SearchMedal => Boolean(medal));
+  const followingValue = hasFieldValue(bbsInfo.follow_status)
+    ? bbsInfo.follow_status
+    : hasFieldValue(info.follow_status) ? info.follow_status : undefined;
+  const stats: UserProfileStats = {
+    following: asNumber(bbsInfo.follow_num, info.follow_num, info.following_count),
+    followers: asNumber(bbsInfo.fan_num, info.fan_num, info.follower_count),
+    likesAndFavorites: asNumber(
+      bbsInfo.be_favoured_num,
+      info.be_favoured_num,
+      bbsInfo.awd_num,
+      info.awd_num
+    ),
+    favorites: asNumber(bbsInfo.favour_num, info.favour_num, info.favorite_count),
+    history: asNumber(bbsInfo.visit_num, info.visit_num, info.history_count),
+    posts: asNumber(bbsInfo.post_link_num, info.post_link_num, info.post_count)
+  };
+  return {
+    id,
+    username,
+    avatar: remoteUrl(info.avatar) || remoteUrl(info.avartar) || remoteUrl(nestedUser.avatar) || remoteUrl(nestedUser.avartar),
+    level: levelFrom(info, nestedUser) || undefined,
+    signature: asText(info.signature, nestedUser.signature) || undefined,
+    ipLocation: asText(info.ip_location, nestedUser.ip_location) || undefined,
+    isFollowing: hasFieldValue(followingValue) ? isEnabledFlag(followingValue) : undefined,
+    medals,
+    stats
+  };
+}
+
 function searchItems(result: UnknownRecord): UnknownRecord[] {
   const items = Array.isArray(result.items)
     ? result.items
@@ -1138,6 +1206,70 @@ export async function fetchSearchSuggestions(query: string): Promise<SearchSugge
     params: { query: query.trim() }
   });
   return searchSuggestionsFrom(searchApiResultRecord(payload));
+}
+
+export async function fetchCurrentUser(): Promise<UserProfile> {
+  const payload = await callBackground({
+    channel: "xiaoheishu-api",
+    operation: "currentUser",
+    params: {}
+  });
+  const result = resultRecord(payload);
+  const accountDetail = asRecord(result.account_detail);
+  const profile = asRecord(result.profile);
+  const merged = {
+    ...profile,
+    ...accountDetail,
+    userid: accountDetail.userid ?? profile.heybox_id,
+    username: accountDetail.username ?? profile.nickname,
+    avatar: accountDetail.avatar ?? accountDetail.avartar ?? profile.avatar,
+    avartar: accountDetail.avartar ?? accountDetail.avatar ?? profile.avatar
+  };
+  const user = mapUserProfile(merged);
+  if (!user) throw new Error("当前登录账号信息不完整");
+  return user;
+}
+
+export async function fetchUserProfile(userId: string): Promise<UserProfile> {
+  const payload = await callBackground({
+    channel: "xiaoheishu-api",
+    operation: "userProfile",
+    params: { userId: userId.trim() }
+  });
+  const result = resultRecord(payload);
+  const user = mapUserProfile(result.account_detail ?? result.user ?? result);
+  if (!user) throw new Error("个人资料字段发生了变化，当前页面暂时无法解析");
+  return user;
+}
+
+export async function fetchProfileEvents(
+  userId: string,
+  width = 720,
+  lastValue = ""
+): Promise<Pick<ProfilePageResult, "posts" | "hasMore" | "nextLastValue">> {
+  const payload = await callBackground({
+    channel: "xiaoheishu-api",
+    operation: "profileEvents",
+    params: {
+      userId: userId.trim(),
+      width: Math.max(320, Math.round(width)),
+      lastValue
+    }
+  });
+  const result = resultRecord(payload);
+  const moments = asArray(result.moments);
+  const posts = moments
+    .map((value) => mapFeedPost(value))
+    .filter((post): post is FeedPost => Boolean(post));
+  const nextLastValue = asText(result.lastval, result.last_val, result.next_lastval);
+  if (moments.length > 0 && posts.length === 0) {
+    throw new Error("个人动态字段发生了变化，当前页面暂时无法解析");
+  }
+  return {
+    posts,
+    hasMore: Boolean(nextLastValue),
+    nextLastValue
+  };
 }
 
 /** Fetch one official search page. Only type=link content and type=user users are exposed. */

@@ -95,6 +95,7 @@ export type CommentContentPart =
 export interface CommentItem {
   id: string;
   author: string;
+  authorId?: string;
   avatar?: string;
   level?: string;
   text: string;
@@ -159,6 +160,34 @@ export interface SearchUser {
   medals: SearchMedal[];
 }
 
+export interface UserProfileStats {
+  following: number;
+  followers: number;
+  likesAndFavorites: number;
+  favorites: number;
+  history: number;
+  posts: number;
+}
+
+export interface UserProfile {
+  id: string;
+  username: string;
+  avatar?: string;
+  level?: string;
+  signature?: string;
+  ipLocation?: string;
+  isFollowing?: boolean;
+  medals: SearchMedal[];
+  stats: UserProfileStats;
+}
+
+export interface ProfilePageResult {
+  profile: UserProfile;
+  posts: FeedPost[];
+  hasMore: boolean;
+  nextLastValue: string;
+}
+
 export interface SearchFilterOption {
   id: string;
   name: string;
@@ -212,6 +241,9 @@ export type HeyboxApiOperation =
   | "searchWelcome"
   | "searchFound"
   | "searchSuggestion"
+  | "currentUser"
+  | "userProfile"
+  | "profileEvents"
   | "detail"
   | "comments"
   | "commentReplies"
@@ -264,6 +296,21 @@ export type HeyboxApiRequest =
       channel: "xiaoheishu-api";
       operation: "searchSuggestion";
       params: { query: string };
+    }
+  | {
+      channel: "xiaoheishu-api";
+      operation: "currentUser";
+      params: { [key: string]: never };
+    }
+  | {
+      channel: "xiaoheishu-api";
+      operation: "userProfile";
+      params: { userId: string };
+    }
+  | {
+      channel: "xiaoheishu-api";
+      operation: "profileEvents";
+      params: { userId: string; width: number; lastValue: string };
     }
   | {
       channel: "xiaoheishu-api";
