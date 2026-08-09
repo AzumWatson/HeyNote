@@ -2,6 +2,8 @@
 
 本文档面向需要检查源码、进行本地研究或维护正式版本的人员。普通用户请直接从 GitHub Releases 下载稳定版 `extension.zip`。
 
+当前版本：`0.8.0`
+
 > [!IMPORTANT]
 > 根据本项目的 [Custom License](../LICENSE)，允许用户为查看、学习、研究和非商业性修改而在本地下载、编译及运行源码。未经书面许可，不得公开发布或分发修改后的源码、衍生代码或构建产物；提交和正式发版章节仅适用于 AzumWatson 或已取得书面授权的维护者。
 
@@ -66,7 +68,8 @@ HeyNote/
 │   ├── domain-entry.tsx             Shadow DOM 生产挂载入口
 │   ├── App.tsx                      信息流、筛选、主题与交互状态
 │   ├── components/                  详情、播放器与通用界面组件
-│   └── data/                        小黑盒接口映射与表情解析
+│   ├── data/                        小黑盒接口映射与表情解析
+│   └── profile-url.ts               HeyNote 用户主页路由工具
 ├── vite.config.ts                   扩展多入口构建配置
 ├── tsconfig.json
 └── package.json
@@ -112,12 +115,12 @@ Compress-Archive -Path dist\* -DestinationPath extension.zip -Force
 npm run build
 ```
 
-确认构建成功后提交代码，并创建与版本号完全一致的标签。例如发布 `0.7.32`：
+确认构建成功后提交代码，并创建与版本号完全一致的标签。例如发布 `0.8.0`：
 
 ```bash
-git tag v0.7.32
+git tag v0.8.0
 git push origin main
-git push origin v0.7.32
+git push origin v0.8.0
 ```
 
 推送 `v*` 标签后，[Release 工作流](../.github/workflows/release.yml)会自动：
