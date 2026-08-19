@@ -1,3 +1,5 @@
+
+
 <div align="center">
 
 # HeyNote 小黑书
@@ -98,7 +100,7 @@ HeyNote 的界面与交互设计灵感来自小红书网页版，并根据我个
 | 项目 | 当前支持情况 |
 | --- | --- |
 | 浏览器 | Chrome 102+；基于 Chromium 的新版 Edge 通常也可使用 |
-| 页面 | `https://www.xiaoheihe.cn/app/bbs/home`，以及其 `/feed`、`/search`、`/user/<用户 ID>`、`/post/<帖子 ID>` 路由 |
+| 页面 | `https://www.xiaoheihe.cn/app/bbs/home`（含 `/feed`、`/search`、`/post/<帖子 ID>` 等哈希路由），以及独立的用户主页路由 `/app/user/profile/<用户 ID>` |
 | 系统 | 桌面端 Windows / macOS；Linux 尚未专项测试 |
 | 登录 | 浏览公开内容可按小黑盒实际限制使用；点赞、收藏、关注等操作需要登录 |
 | Firefox / Safari | 暂未适配 |
